@@ -52,3 +52,41 @@ func (c *Config) LoadState() string {
 	}
 	return string(data)
 }
+
+// WindowGeometry stores the window size and position.
+type WindowGeometry struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	X      int `json:"x"`
+	Y      int `json:"y"`
+}
+
+// SaveWindowGeometry persists window size and position to disk.
+func (c *Config) SaveWindowGeometry(g WindowGeometry) error {
+	data, err := json.Marshal(g)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(c.dir, "window.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// LoadWindowGeometry reads the saved window geometry from disk.
+func (c *Config) LoadWindowGeometry() *WindowGeometry {
+	data, err := os.ReadFile(filepath.Join(c.dir, "window.json"))
+	if err != nil {
+		return nil
+	}
+	var g WindowGeometry
+	if json.Unmarshal(data, &g) != nil {
+		return nil
+	}
+	if g.Width < 400 || g.Height < 300 {
+		return nil
+	}
+	return &g
+}

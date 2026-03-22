@@ -65,7 +65,7 @@ func main() {
 		},
 		Menu:                     appMenu,
 		Frameless:                false,
-		EnableDefaultContextMenu: true,
+		EnableDefaultContextMenu: false,
 	})
 
 	if err != nil {

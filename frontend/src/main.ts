@@ -146,7 +146,13 @@ class ElTerminalo {
 
   private async createTab(name?: string): Promise<void> {
     if (this.tabs.length >= MAX_TABS) return;
-    const tabName = name || `Terminalo ${this.tabs.length + 1}`;
+    let tabName = name;
+    if (!tabName) {
+      const used = new Set(this.tabs.map(t => t.name));
+      let n = 1;
+      while (used.has(`Terminalo ${n}`)) n++;
+      tabName = `Terminalo ${n}`;
+    }
     const tab: Tab = {
       id: generateId('tab'),
       name: tabName,
@@ -361,6 +367,12 @@ class ElTerminalo {
     const pane = new TerminalPane(el, this.currentTheme.xterm);
     const id = generateId('pane');
     const info: PaneInfo = { id, pane, element: el };
+
+    pane.setContextActions({
+      splitVertical: () => this.splitPane('vertical'),
+      splitHorizontal: () => this.splitPane('horizontal'),
+      closePane: () => this.closeActivePane(),
+    });
 
     el.addEventListener('mousedown', (e) => {
       if (e.button === 2) return; // don't steal focus on right-click
@@ -616,15 +628,17 @@ class ElTerminalo {
 
   private getBuiltInCommands(): PaletteCommand[] {
     return [
-      { name: 'New Tab', desc: 'Open a new terminal tab', category: 'Tabs', action: () => this.createTab() },
-      { name: 'Close Tab', desc: 'Close current tab', category: 'Tabs', action: () => this.closeTab(this.activeTabIndex) },
+      { name: 'New Tab', desc: 'Open a new terminal tab', category: 'Tabs', shortcutDisplay: 'Cmd+T', action: () => this.createTab() },
+      { name: 'Close Tab', desc: 'Close current tab', category: 'Tabs', shortcutDisplay: 'Cmd+W', action: () => this.closeTab(this.activeTabIndex) },
       { name: 'Rename Tab', desc: 'Rename current tab', category: 'Tabs', action: () => { this.palette.hide(); this.renamingTabIndex = this.activeTabIndex; this.renderTabBar(); } },
-      { name: 'Split Vertical', desc: 'Split pane side by side', category: 'Panes', action: () => this.splitPane('vertical') },
-      { name: 'Split Horizontal', desc: 'Split pane top/bottom', category: 'Panes', action: () => this.splitPane('horizontal') },
-      { name: 'Close Pane', desc: 'Close the active pane', category: 'Panes', action: () => this.closeActivePane() },
-      { name: 'Next Pane', desc: 'Focus the next pane', category: 'Panes', action: () => this.navigateSpatial('right') },
-      { name: 'Previous Pane', desc: 'Focus the previous pane', category: 'Panes', action: () => this.navigateSpatial('left') },
-      { name: 'Create Command', desc: 'Cmd + Shift + C', category: 'Commands', action: () => { this.palette.hide(); this.wizard.show(); } },
+      { name: 'Split Vertical', desc: 'Split pane side by side', category: 'Panes', shortcutDisplay: 'Cmd+B', action: () => this.splitPane('vertical') },
+      { name: 'Split Horizontal', desc: 'Split pane top/bottom', category: 'Panes', shortcutDisplay: 'Cmd+G', action: () => this.splitPane('horizontal') },
+      { name: 'Close Pane', desc: 'Close the active pane', category: 'Panes', shortcutDisplay: 'Cmd+X', action: () => this.closeActivePane() },
+      { name: 'Next Pane', desc: 'Focus the next pane', category: 'Panes', shortcutDisplay: 'Cmd+→', action: () => this.navigateSpatial('right') },
+      { name: 'Previous Pane', desc: 'Focus the previous pane', category: 'Panes', shortcutDisplay: 'Cmd+←', action: () => this.navigateSpatial('left') },
+      { name: 'Command Palette', desc: 'Open command palette', category: 'General', shortcutDisplay: 'Cmd+P', action: () => this.palette.show() },
+      { name: 'Clear Terminal', desc: 'Clear the active terminal', category: 'General', shortcutDisplay: 'Cmd+L', action: () => this.clearActiveTerminal() },
+      { name: 'Create Command', desc: 'Create a custom command', category: 'Commands', shortcutDisplay: 'Cmd+Shift+C', action: () => { this.palette.hide(); this.wizard.show(); } },
       ...this.themes.map(t => ({
         name: `Theme: ${t.name}`, desc: `Switch to ${t.name} theme`, category: 'Appearance',
         isTheme: true,
@@ -731,7 +745,30 @@ class ElTerminalo {
       return;
     }
 
-    // Built-in shortcuts FIRST (always win over custom)
+    // Custom command shortcuts (checked first — they use Ctrl/Alt combos
+    // that don't overlap with built-in Cmd shortcuts)
+    if (this.customCommands.length > 0) {
+      const parts: string[] = [];
+      if (e.metaKey) parts.push('Cmd');
+      if (e.ctrlKey) parts.push('Ctrl');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.altKey) parts.push('Alt');
+      const keyName = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+      if (!['Control', 'Meta', 'Shift', 'Alt'].includes(keyName)) {
+        parts.push(keyName);
+        const pressed = parts.join('+');
+        for (const c of this.customCommands) {
+          if (c.shortcut && c.shortcut.toLowerCase() === pressed.toLowerCase()) {
+            e.preventDefault(); e.stopImmediatePropagation();
+            const ap = this.panes[this.activeIndex];
+            if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, btoa(c.command + '\n'));
+            return;
+          }
+        }
+      }
+    }
+
+    // Built-in shortcuts (Cmd-based)
     if (isMeta) {
       if (e.shiftKey && e.key.toLowerCase() === 'c') { e.preventDefault(); this.wizard.show(); return; }
 
@@ -752,28 +789,6 @@ class ElTerminalo {
           e.preventDefault();
           this.navigateSpatial(e.key.toLowerCase().replace('arrow', '') as 'left' | 'right' | 'up' | 'down');
           return;
-      }
-    }
-
-    // Custom command shortcuts AFTER built-in
-    if (this.customCommands.length > 0) {
-      const parts: string[] = [];
-      if (e.metaKey) parts.push('Cmd');
-      if (e.ctrlKey) parts.push('Ctrl');
-      if (e.shiftKey) parts.push('Shift');
-      if (e.altKey) parts.push('Alt');
-      const keyName = e.key.length === 1 ? e.key.toUpperCase() : e.key;
-      if (!['Control', 'Meta', 'Shift', 'Alt'].includes(keyName)) {
-        parts.push(keyName);
-        const pressed = parts.join('+');
-        for (const c of this.customCommands) {
-          if (c.shortcut && c.shortcut.toLowerCase() === pressed.toLowerCase()) {
-            e.preventDefault(); e.stopImmediatePropagation();
-            const ap = this.panes[this.activeIndex];
-            if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, btoa(c.command + '\n'));
-            return;
-          }
-        }
       }
     }
   }

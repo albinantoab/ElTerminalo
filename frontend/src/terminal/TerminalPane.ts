@@ -27,6 +27,12 @@ export interface XtermTheme {
   brightWhite: string;
 }
 
+export interface TerminalContextActions {
+  splitVertical: () => void;
+  splitHorizontal: () => void;
+  closePane: () => void;
+}
+
 export class TerminalPane {
   public sessionId: string = '';
   public terminal: Terminal;
@@ -37,6 +43,7 @@ export class TerminalPane {
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private lastCols: number = 0;
   private lastRows: number = 0;
+  private ctxActions: TerminalContextActions | null = null;
 
   constructor(container: HTMLElement, theme: XtermTheme) {
     this.container = container;
@@ -49,6 +56,7 @@ export class TerminalPane {
       lineHeight: 1.2,
       theme: theme,
       allowProposedApi: true,
+      rightClickSelectsWord: true,
     });
 
     this.fitAddon = new FitAddon();
@@ -56,14 +64,9 @@ export class TerminalPane {
 
     this.terminal.open(container);
 
-    // Prevent xterm from handling right-click mousedown (clears selection,
-    // blocks context menu on first attempt)
-    const screen = container.querySelector('.xterm-screen');
-    if (screen) {
-      screen.addEventListener('mousedown', (e) => {
-        if ((e as MouseEvent).button === 2) e.stopImmediatePropagation();
-      }, true);
-    }
+    // Custom context menu — xterm renders on canvas so Wails'
+    // default context menu can't see terminal selections.
+    this.initContextMenu(container);
 
     // Try WebGL renderer for GPU acceleration
     try {
@@ -145,6 +148,123 @@ export class TerminalPane {
   async getCWD(): Promise<string> {
     if (!this.sessionId) return '';
     return await window.go.main.App.GetSessionCWD(this.sessionId);
+  }
+
+  private initContextMenu(container: HTMLElement): void {
+    let menu: HTMLElement | null = null;
+
+    const dismiss = () => {
+      if (menu) { menu.remove(); menu = null; }
+    };
+
+    container.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss();
+
+      const hasSelection = this.terminal.hasSelection();
+
+      menu = document.createElement('div');
+      menu.className = 'term-ctx-menu';
+      menu.style.left = `${e.clientX}px`;
+      menu.style.top = `${e.clientY}px`;
+
+      type MenuItem = { type: 'action'; label: string; shortcut?: string; action: () => void; enabled: boolean } | { type: 'separator' };
+
+      const items: MenuItem[] = [
+        {
+          type: 'action', label: 'Copy', shortcut: 'Cmd+C',
+          enabled: hasSelection,
+          action: () => {
+            const text = this.terminal.getSelection();
+            navigator.clipboard.writeText(text);
+            this.terminal.clearSelection();
+          },
+        },
+        {
+          type: 'action', label: 'Paste', shortcut: 'Cmd+V',
+          enabled: true,
+          action: async () => {
+            const text = await navigator.clipboard.readText();
+            const encoded = btoa(text);
+            window.go.main.App.WriteToSession(this.sessionId, encoded);
+          },
+        },
+        { type: 'separator' },
+        {
+          type: 'action', label: 'Select All', shortcut: 'Cmd+A',
+          enabled: true,
+          action: () => this.terminal.selectAll(),
+        },
+        {
+          type: 'action', label: 'Clear',
+          enabled: true,
+          action: () => this.terminal.clear(),
+        },
+        { type: 'separator' },
+        {
+          type: 'action', label: 'Split Vertical', shortcut: 'Cmd+B',
+          enabled: !!this.ctxActions,
+          action: () => this.ctxActions?.splitVertical(),
+        },
+        {
+          type: 'action', label: 'Split Horizontal', shortcut: 'Cmd+G',
+          enabled: !!this.ctxActions,
+          action: () => this.ctxActions?.splitHorizontal(),
+        },
+        {
+          type: 'action', label: 'Close Pane', shortcut: 'Cmd+X',
+          enabled: !!this.ctxActions,
+          action: () => this.ctxActions?.closePane(),
+        },
+      ];
+
+      for (const item of items) {
+        if (item.type === 'separator') {
+          const sep = document.createElement('div');
+          sep.className = 'term-ctx-separator';
+          menu.appendChild(sep);
+          continue;
+        }
+        const el = document.createElement('div');
+        el.className = 'term-ctx-item' + (item.enabled ? '' : ' disabled');
+        const labelSpan = document.createElement('span');
+        labelSpan.textContent = item.label;
+        el.appendChild(labelSpan);
+        if (item.shortcut) {
+          const shortcutSpan = document.createElement('span');
+          shortcutSpan.className = 'term-ctx-shortcut';
+          shortcutSpan.textContent = item.shortcut;
+          el.appendChild(shortcutSpan);
+        }
+        if (item.enabled) {
+          el.addEventListener('mousedown', (ev) => {
+            ev.stopPropagation();
+            item.action();
+            dismiss();
+          });
+        }
+        menu.appendChild(el);
+      }
+
+      document.body.appendChild(menu);
+
+      // Keep menu within viewport
+      requestAnimationFrame(() => {
+        if (!menu) return;
+        const r = menu.getBoundingClientRect();
+        if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
+        if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 4}px`;
+      });
+    }, true);
+
+    // Dismiss on any click or keydown
+    document.addEventListener('mousedown', dismiss);
+    document.addEventListener('keydown', dismiss);
+  }
+
+  setContextActions(actions: TerminalContextActions): void {
+    this.ctxActions = actions;
   }
 
   focus(): void {

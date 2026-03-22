@@ -10,6 +10,7 @@ import (
 	"github.com/albinanto/elterminalo/internal/ptymanager"
 	"github.com/albinanto/elterminalo/internal/theme"
 	"github.com/albinanto/elterminalo/internal/updater"
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // Version is set at build time via -ldflags.
@@ -37,9 +38,22 @@ func NewApp(shell string, cfg *config.Config) *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.ptyMgr.SetContext(ctx)
+
+	// Restore saved window geometry
+	if g := a.cfg.LoadWindowGeometry(); g != nil {
+		wailsRuntime.WindowSetPosition(ctx, g.X, g.Y)
+		wailsRuntime.WindowSetSize(ctx, g.Width, g.Height)
+	}
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	// Save window geometry before closing
+	w, h := wailsRuntime.WindowGetSize(ctx)
+	x, y := wailsRuntime.WindowGetPosition(ctx)
+	a.cfg.SaveWindowGeometry(config.WindowGeometry{
+		Width: w, Height: h, X: x, Y: y,
+	})
+
 	a.ptyMgr.CloseAll()
 }
 
