@@ -448,6 +448,21 @@ html, body {
   color: var(--accent-dim);
 }
 
+.status-update {
+  color: #56d364;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: rgba(86, 211, 100, 0.1);
+  transition: background 0.15s;
+}
+
+.status-update:hover {
+  background: rgba(86, 211, 100, 0.2);
+}
+
 .status-dot-active {
   color: var(--accent);
 }

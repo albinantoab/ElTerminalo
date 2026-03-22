@@ -9,7 +9,11 @@ import (
 	"github.com/albinanto/elterminalo/internal/config"
 	"github.com/albinanto/elterminalo/internal/ptymanager"
 	"github.com/albinanto/elterminalo/internal/theme"
+	"github.com/albinanto/elterminalo/internal/updater"
 )
+
+// Version is set at build time via -ldflags.
+var Version = "dev"
 
 // App is the main Wails-bound application struct.
 type App struct {
@@ -169,4 +173,14 @@ func (a *App) DeleteCommand(scope, name, cwd string) error {
 // UpdateCommand replaces a command by oldName with new values.
 func (a *App) UpdateCommand(scope, oldName, newName, newCommand, newDescription, newShortcut, cwd string) error {
 	return a.cmds.Update(scope, oldName, newName, newCommand, newDescription, newShortcut, cwd)
+}
+
+// GetVersion returns the current application version.
+func (a *App) GetVersion() string {
+	return Version
+}
+
+// CheckForUpdate checks GitHub for a newer release.
+func (a *App) CheckForUpdate() updater.UpdateInfo {
+	return updater.Check(Version)
 }

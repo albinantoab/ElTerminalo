@@ -17,6 +17,15 @@ export interface WailsApp {
   UpdateCommand(scope: string, oldName: string, newName: string, newCommand: string, newDescription: string, newShortcut: string, cwd: string): Promise<void>;
   SaveTheme(name: string, background: string, foreground: string, accent: string, accentDim: string, border: string, borderActive: string, statusBg: string, statusFg: string, cursorColor: string, selectionBg: string, black: string, red: string, green: string, yellow: string, blue: string, magenta: string, cyan: string, white: string, brightBlack: string, brightRed: string, brightGreen: string, brightYellow: string, brightBlue: string, brightMagenta: string, brightCyan: string, brightWhite: string): Promise<void>;
   DeleteTheme(name: string): Promise<void>;
+  GetVersion(): Promise<string>;
+  CheckForUpdate(): Promise<UpdateInfo>;
+}
+
+export interface UpdateInfo {
+  available: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  url: string;
 }
 
 export interface ThemeDTO {

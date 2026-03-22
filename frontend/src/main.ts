@@ -109,6 +109,23 @@ class ElTerminalo {
 
     // Dismiss splash screen
     this.dismissSplash();
+
+    // Check for updates in background (non-blocking)
+    this.checkForUpdate();
+  }
+
+  private updateInfo: { available: boolean; latestVersion: string; url: string } | null = null;
+
+  private async checkForUpdate(): Promise<void> {
+    try {
+      const info = await window.go.main.App.CheckForUpdate();
+      if (info.available) {
+        this.updateInfo = { available: true, latestVersion: info.latestVersion, url: info.url };
+        this.renderStatusBar();
+      }
+    } catch (_) {
+      // Silently ignore — update check is best-effort
+    }
   }
 
   private dismissSplash(): void {
@@ -513,8 +530,12 @@ class ElTerminalo {
   // --- Status Bar ---
 
   private renderStatusBar(): void {
+    const updateBadge = this.updateInfo?.available
+      ? `<a class="status-update" id="status-update-link">Update v${this.updateInfo.latestVersion} available</a><span class="status-sep">·</span>`
+      : '';
+
     this.statusbar.innerHTML = `
-      <div class="status-left"></div>
+      <div class="status-left">${updateBadge}</div>
       <div class="status-right">
         <span class="status-key">Cmd + P</span><span class="status-label">commands</span>
         <span class="status-sep">·</span>
@@ -531,6 +552,12 @@ class ElTerminalo {
         <span class="status-key">Cmd + L</span><span class="status-label">clear</span>
       </div>
     `;
+
+    if (this.updateInfo?.available) {
+      document.getElementById('status-update-link')?.addEventListener('click', () => {
+        window.open(this.updateInfo!.url);
+      });
+    }
   }
 
   // --- Custom Commands ---
