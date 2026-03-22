@@ -113,6 +113,25 @@ class ElTerminalo {
     // Check for updates in background (non-blocking), then every 6 hours
     this.checkForUpdate();
     setInterval(() => this.checkForUpdate(), 6 * 60 * 60 * 1000);
+
+    // Handle file drops — listen directly to Wails native drop event
+    window.runtime.EventsOn('wails:file-drop', (...args: any[]) => {
+      const ap = this.panes[this.activeIndex];
+      if (!ap) return;
+      // Args from Wails: (x, y, paths) or (paths) depending on how emitted
+      let paths: string[] = [];
+      for (const arg of args) {
+        if (Array.isArray(arg)) { paths = arg; break; }
+      }
+      if (paths.length === 0 || (paths.length === 1 && !paths[0])) return;
+      const escaped = paths.map(p => this.shellEscape(p)).join(' ');
+      window.go.main.App.WriteToSession(ap.pane.sessionId, btoa(escaped + ' '));
+    });
+  }
+
+  private shellEscape(path: string): string {
+    if (/^[a-zA-Z0-9_.\/~-]+$/.test(path)) return path;
+    return "'" + path.replace(/'/g, "'\\''") + "'";
   }
 
   private updateInfo: { available: boolean; latestVersion: string; url: string } | null = null;

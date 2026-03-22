@@ -66,6 +66,10 @@ func main() {
 		Menu:                     appMenu,
 		Frameless:                false,
 		EnableDefaultContextMenu: false,
+		DragAndDrop: &options.DragAndDrop{
+			EnableFileDrop:    true,
+			DisableWebViewDrop: true,
+		},
 	})
 
 	if err != nil {

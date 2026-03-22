@@ -47,6 +47,7 @@ export class TerminalPane {
 
   constructor(container: HTMLElement, theme: XtermTheme) {
     this.container = container;
+    container.style.setProperty('--wails-drop-target', 'drop');
 
     this.terminal = new Terminal({
       cursorBlink: true,
