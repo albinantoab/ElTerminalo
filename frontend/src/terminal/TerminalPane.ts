@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import '../types/wails.d.ts';
+import { utf8ToBase64 } from '../utils';
 
 export interface XtermTheme {
   background: string;
@@ -47,7 +48,6 @@ export class TerminalPane {
 
   constructor(container: HTMLElement, theme: XtermTheme) {
     this.container = container;
-    container.style.setProperty('--wails-drop-target', 'drop');
 
     this.terminal = new Terminal({
       cursorBlink: true,
@@ -108,8 +108,7 @@ export class TerminalPane {
 
     // Forward keyboard input to PTY
     this.terminal.onData((data: string) => {
-      const encoded = btoa(data);
-      window.go.main.App.WriteToSession(this.sessionId, encoded);
+      window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64(data));
     });
 
     // Forward resize events to PTY — debounced to avoid shell prompt spam
@@ -187,8 +186,7 @@ export class TerminalPane {
           enabled: true,
           action: async () => {
             const text = await navigator.clipboard.readText();
-            const encoded = btoa(text);
-            window.go.main.App.WriteToSession(this.sessionId, encoded);
+            window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64(text));
           },
         },
         { type: 'separator' },

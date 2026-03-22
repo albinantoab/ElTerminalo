@@ -1,4 +1,5 @@
 import { PaletteCommand, CustomCommand } from '../types';
+import { utf8ToBase64 } from '../utils';
 
 export interface PaletteCallbacks {
   getBuiltInCommands(): PaletteCommand[];
@@ -109,7 +110,7 @@ export class CommandPalette {
       action: (metaKey?: boolean) => {
         const sessionId = this.callbacks.getActiveSessionId();
         if (!sessionId) return;
-        window.go.main.App.WriteToSession(sessionId, btoa(c.command + (metaKey ? '' : '\n')));
+        window.go.main.App.WriteToSession(sessionId, utf8ToBase64(c.command + (metaKey ? '' : '\n')));
       },
     }));
 

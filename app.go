@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/albinanto/elterminalo/internal/commands"
@@ -18,20 +21,23 @@ var Version = "dev"
 
 // App is the main Wails-bound application struct.
 type App struct {
-	ctx    context.Context
-	ptyMgr *ptymanager.Manager
-	shell  string
-	cfg    *config.Config
-	cmds   *commands.Store
+	ctx     context.Context
+	ptyMgr  *ptymanager.Manager
+	shell   string
+	cfg     *config.Config
+	cmds    *commands.Store
+	dropDir string
 }
 
 // NewApp creates a new App instance.
 func NewApp(shell string, cfg *config.Config) *App {
+	dropDir, _ := os.MkdirTemp("", "elterminalo-drops-*")
 	return &App{
-		shell:  shell,
-		ptyMgr: ptymanager.NewManager(shell),
-		cfg:    cfg,
-		cmds:   commands.NewStore(cfg.Dir()),
+		shell:   shell,
+		ptyMgr:  ptymanager.NewManager(shell),
+		cfg:     cfg,
+		cmds:    commands.NewStore(cfg.Dir()),
+		dropDir: dropDir,
 	}
 }
 
@@ -53,6 +59,11 @@ func (a *App) shutdown(ctx context.Context) {
 	a.cfg.SaveWindowGeometry(config.WindowGeometry{
 		Width: w, Height: h, X: x, Y: y,
 	})
+
+	// Clean up dropped files
+	if a.dropDir != "" {
+		os.RemoveAll(a.dropDir)
+	}
 
 	a.ptyMgr.CloseAll()
 }
@@ -202,4 +213,25 @@ func (a *App) CheckForUpdate() updater.UpdateInfo {
 // ApplyUpdate downloads and installs the latest release, then relaunches.
 func (a *App) ApplyUpdate() error {
 	return updater.ApplyUpdate()
+}
+
+// SaveDroppedFile saves base64-encoded file data to a temp directory
+// and returns the full path. Used for HTML5 drag-and-drop.
+// Files are cleaned up when the app shuts down.
+func (a *App) SaveDroppedFile(fileName string, dataBase64 string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(dataBase64)
+	if err != nil {
+		return "", fmt.Errorf("invalid base64 data: %w", err)
+	}
+
+	if err := os.MkdirAll(a.dropDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create temp dir: %w", err)
+	}
+
+	dest := filepath.Join(a.dropDir, fileName)
+	if err := os.WriteFile(dest, data, 0644); err != nil {
+		return "", fmt.Errorf("cannot write file: %w", err)
+	}
+
+	return dest, nil
 }

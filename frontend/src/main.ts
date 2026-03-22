@@ -5,7 +5,7 @@ import { CommandPalette } from './palette/CommandPalette';
 import { CommandWizard } from './wizard/CommandWizard';
 import { ThemeWizard } from './wizard/ThemeWizard';
 import { StateManager } from './state/StateManager';
-import { escHtml, generateId, waitForLayout } from './utils';
+import { escHtml, generateId, waitForLayout, utf8ToBase64, bytesToBase64 } from './utils';
 import {
   MAX_TABS, DOUBLE_CLICK_DELAY_MS, MIN_SPLIT_RATIO, MAX_SPLIT_RATIO,
   DEFAULT_SPLIT_RATIO, SPATIAL_NAV_THRESHOLD, STATE_SAVE_INTERVAL_MS,
@@ -114,25 +114,35 @@ class ElTerminalo {
     this.checkForUpdate();
     setInterval(() => this.checkForUpdate(), 6 * 60 * 60 * 1000);
 
-    // Handle file drops — listen directly to Wails native drop event
-    window.runtime.EventsOn('wails:file-drop', (...args: any[]) => {
+    // Handle file drops — read via HTML5 API, save to temp via Go
+    document.addEventListener('dragover', (e) => e.preventDefault(), true);
+    document.addEventListener('drop', async (e) => {
+      e.preventDefault();
       const ap = this.panes[this.activeIndex];
-      if (!ap) return;
-      // Args from Wails: (x, y, paths) or (paths) depending on how emitted
-      let paths: string[] = [];
-      for (const arg of args) {
-        if (Array.isArray(arg)) { paths = arg; break; }
+      if (!ap?.pane.sessionId || !e.dataTransfer?.files?.length) return;
+      const paths: string[] = [];
+      for (let i = 0; i < e.dataTransfer.files.length; i++) {
+        const f = e.dataTransfer.files[i];
+        if (!f) continue;
+        try {
+          const buf = await f.arrayBuffer();
+          const b64 = bytesToBase64(new Uint8Array(buf));
+          const path = await window.go.main.App.SaveDroppedFile(f.name, b64);
+          if (path) paths.push(path);
+        } catch { /* skip failed files */ }
       }
-      if (paths.length === 0 || (paths.length === 1 && !paths[0])) return;
-      const escaped = paths.map(p => this.shellEscape(p)).join(' ');
-      window.go.main.App.WriteToSession(ap.pane.sessionId, btoa(escaped + ' '));
-    });
+      if (paths.length > 0) {
+        const escaped = paths.map(p => this.shellEscape(p)).join(' ');
+        window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(escaped + ' '));
+      }
+    }, true);
   }
 
   private shellEscape(path: string): string {
     if (/^[a-zA-Z0-9_.\/~-]+$/.test(path)) return path;
     return "'" + path.replace(/'/g, "'\\''") + "'";
   }
+
 
   private updateInfo: { available: boolean; latestVersion: string; url: string } | null = null;
 
@@ -737,7 +747,7 @@ class ElTerminalo {
 
   private clearActiveTerminal(): void {
     const ap = this.panes[this.activeIndex];
-    if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, btoa('clear\n'));
+    if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('clear\n'));
   }
 
   // --- Keyboard ---
@@ -780,7 +790,7 @@ class ElTerminalo {
           if (c.shortcut && c.shortcut.toLowerCase() === pressed.toLowerCase()) {
             e.preventDefault(); e.stopImmediatePropagation();
             const ap = this.panes[this.activeIndex];
-            if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, btoa(c.command + '\n'));
+            if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(c.command + '\n'));
             return;
           }
         }

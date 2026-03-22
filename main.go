@@ -67,8 +67,7 @@ func main() {
 		Frameless:                false,
 		EnableDefaultContextMenu: false,
 		DragAndDrop: &options.DragAndDrop{
-			EnableFileDrop:    true,
-			DisableWebViewDrop: true,
+			DisableWebViewDrop: false, // allow HTML5 drop events for our custom handler
 		},
 	})
 
