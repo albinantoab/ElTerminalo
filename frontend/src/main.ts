@@ -361,7 +361,8 @@ class ElTerminalo {
     const id = generateId('pane');
     const info: PaneInfo = { id, pane, element: el };
 
-    el.addEventListener('mousedown', () => {
+    el.addEventListener('mousedown', (e) => {
+      if (e.button === 2) return; // don't steal focus on right-click
       const idx = tab.panes.indexOf(info);
       if (idx >= 0 && tab === this.tab) this.setActive(idx);
     });
