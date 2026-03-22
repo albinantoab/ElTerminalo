@@ -56,6 +56,15 @@ export class TerminalPane {
 
     this.terminal.open(container);
 
+    // Prevent xterm from handling right-click mousedown (clears selection,
+    // blocks context menu on first attempt)
+    const screen = container.querySelector('.xterm-screen');
+    if (screen) {
+      screen.addEventListener('mousedown', (e) => {
+        if ((e as MouseEvent).button === 2) e.stopImmediatePropagation();
+      }, true);
+    }
+
     // Try WebGL renderer for GPU acceleration
     try {
       const webglAddon = new WebglAddon();

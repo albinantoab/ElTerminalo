@@ -110,8 +110,9 @@ class ElTerminalo {
     // Dismiss splash screen
     this.dismissSplash();
 
-    // Check for updates in background (non-blocking)
+    // Check for updates in background (non-blocking), then every 6 hours
     this.checkForUpdate();
+    setInterval(() => this.checkForUpdate(), 6 * 60 * 60 * 1000);
   }
 
   private updateInfo: { available: boolean; latestVersion: string; url: string } | null = null;
