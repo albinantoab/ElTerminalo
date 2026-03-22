@@ -56,7 +56,7 @@ func main() {
 				HideTitleBar:              false,
 				FullSizeContent:           true,
 			},
-			WebviewIsTransparent: true,
+			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
 			About: &mac.AboutInfo{
 				Title:   "El Terminalo",
