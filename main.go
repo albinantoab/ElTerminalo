@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/albinanto/elterminalo/internal/config"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/menu"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -21,13 +22,19 @@ func main() {
 		shell = s
 	}
 
-	app := NewApp(shell)
+	cfg, err := config.New()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	app := NewApp(shell, cfg)
 
 	// Minimal menu with NO accelerators — all Cmd+ shortcuts go to the webview
 	appMenu := menu.NewMenu()
 	appMenu.Append(menu.AppMenu()) // keeps About, Hide, Quit
 
-	err := wails.Run(&options.App{
+	err = wails.Run(&options.App{
 		Title:     "El Terminalo",
 		Width:     1024,
 		Height:    768,
@@ -55,8 +62,8 @@ func main() {
 				Message: "A modern terminal for agent coding",
 			},
 		},
-		Menu:                 appMenu,
-		Frameless:            false,
+		Menu:                     appMenu,
+		Frameless:                false,
 		EnableDefaultContextMenu: true,
 	})
 
