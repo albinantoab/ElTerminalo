@@ -30,9 +30,10 @@ func main() {
 
 	app := NewApp(shell, cfg)
 
-	// Minimal menu with NO accelerators — all Cmd+ shortcuts go to the webview
+	// Minimal menu — Edit menu is required for Cmd+C/V/X/A to reach the webview
 	appMenu := menu.NewMenu()
 	appMenu.Append(menu.AppMenu()) // keeps About, Hide, Quit
+	appMenu.Append(menu.EditMenu()) // enables Cut, Copy, Paste, Select All
 
 	err = wails.Run(&options.App{
 		Title:     "El Terminalo",
