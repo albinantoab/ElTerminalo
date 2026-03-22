@@ -1,0 +1,30 @@
+# Build outputs
+build/bin/
+elterminalo
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/wailsjs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Temp
+*.tmp
+/tmp/
