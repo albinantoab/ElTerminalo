@@ -184,3 +184,8 @@ func (a *App) GetVersion() string {
 func (a *App) CheckForUpdate() updater.UpdateInfo {
 	return updater.Check(Version)
 }
+
+// ApplyUpdate downloads and installs the latest release, then relaunches.
+func (a *App) ApplyUpdate() error {
+	return updater.ApplyUpdate()
+}

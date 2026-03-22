@@ -463,6 +463,47 @@ html, body {
   background: rgba(86, 211, 100, 0.2);
 }
 
+/* Update dialog */
+.update-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+}
+
+.update-dialog {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 24px;
+  width: 360px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.update-dialog-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #56d364;
+}
+
+.update-dialog-body {
+  font-size: 13px;
+  color: #9ca3af;
+  line-height: 1.6;
+}
+
+.update-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .status-dot-active {
   color: var(--accent);
 }

@@ -74,30 +74,38 @@ hdiutil create \
 rm -rf "${DMG_STAGING}"
 echo "✓ DMG created"
 
-# ── Step 6: Also copy the .app for direct distribution ──
-cp -R "build/bin/${APP}" "${RELEASE_DIR}/${APP}"
+# ── Step 6: Create ZIP (used by auto-updater) ──
+ZIP="${APP_NAME}-${VERSION}-macos-arm64.zip"
+echo "→ Creating ZIP for auto-updater..."
+cd "build/bin" && zip -qr "../../${RELEASE_DIR}/${ZIP}" "${APP}" && cd ../..
+echo "✓ ZIP created"
 
-# ── Step 7: Create checksums ──
+# ── Step 8: Create checksums ──
 echo "→ Generating checksums..."
 cd "${RELEASE_DIR}"
-shasum -a 256 "${DMG}" > "${DMG}.sha256"
+shasum -a 256 "${DMG}" "${ZIP}" > checksums-sha256.txt
 cd ..
 
 # ── Done ──
 DMG_SIZE=$(du -h "${RELEASE_DIR}/${DMG}" | cut -f1 | xargs)
+ZIP_SIZE=$(du -h "${RELEASE_DIR}/${ZIP}" | cut -f1 | xargs)
 echo ""
 echo "╔══════════════════════════════════════╗"
 echo "║   Release build complete!            ║"
 echo "╠══════════════════════════════════════╣"
 echo "║                                      ║"
-echo "  Version:  ${VERSION}"
-echo "  DMG:      ${RELEASE_DIR}/${DMG} (${DMG_SIZE})"
-echo "  App:      ${RELEASE_DIR}/${APP}"
-echo "  Checksum: ${RELEASE_DIR}/${DMG}.sha256"
+echo "  Version:   ${VERSION}"
+echo "  DMG:       ${RELEASE_DIR}/${DMG} (${DMG_SIZE})"
+echo "  ZIP:       ${RELEASE_DIR}/${ZIP} (${ZIP_SIZE})"
+echo "  Checksums: ${RELEASE_DIR}/checksums-sha256.txt"
 echo "║                                      ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
 echo "To create a GitHub release:"
 echo "  git tag v${VERSION}"
 echo "  git push origin v${VERSION}"
-echo "  gh release create v${VERSION} ${RELEASE_DIR}/${DMG} --title \"v${VERSION}\" --generate-notes"
+echo "  gh release create v${VERSION} \\"
+echo "    ${RELEASE_DIR}/${DMG} \\"
+echo "    ${RELEASE_DIR}/${ZIP} \\"
+echo "    ${RELEASE_DIR}/checksums-sha256.txt \\"
+echo "    --title \"v${VERSION}\" --generate-notes"

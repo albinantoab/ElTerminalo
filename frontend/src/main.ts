@@ -555,9 +555,43 @@ class ElTerminalo {
 
     if (this.updateInfo?.available) {
       document.getElementById('status-update-link')?.addEventListener('click', () => {
-        window.open(this.updateInfo!.url);
+        this.promptUpdate();
       });
     }
+  }
+
+  private async promptUpdate(): Promise<void> {
+    if (!this.updateInfo?.available) return;
+
+    // Show confirmation overlay
+    const overlay = document.createElement('div');
+    overlay.className = 'update-overlay';
+    overlay.innerHTML = `<div class="update-dialog">
+      <div class="update-dialog-title">Update Available</div>
+      <div class="update-dialog-body">
+        v${this.updateInfo.latestVersion} is ready to install.<br>
+        The app will restart automatically.
+      </div>
+      <div class="update-dialog-actions">
+        <button class="theme-btn theme-btn-cancel" id="update-cancel">Later</button>
+        <button class="theme-btn theme-btn-save" id="update-now">Update Now</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+
+    document.getElementById('update-cancel')?.addEventListener('click', () => overlay.remove());
+    document.getElementById('update-now')?.addEventListener('click', async () => {
+      const btn = document.getElementById('update-now') as HTMLButtonElement;
+      btn.textContent = 'Downloading...';
+      btn.disabled = true;
+      try {
+        await window.go.main.App.ApplyUpdate();
+      } catch (e) {
+        btn.textContent = 'Failed — retry';
+        btn.disabled = false;
+        console.error('Update failed:', e);
+      }
+    });
   }
 
   // --- Custom Commands ---

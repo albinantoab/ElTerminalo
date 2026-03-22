@@ -19,6 +19,7 @@ export interface WailsApp {
   DeleteTheme(name: string): Promise<void>;
   GetVersion(): Promise<string>;
   CheckForUpdate(): Promise<UpdateInfo>;
+  ApplyUpdate(): Promise<void>;
 }
 
 export interface UpdateInfo {
