@@ -6,7 +6,7 @@ A modern, GPU-accelerated terminal emulator for macOS.
 
 ## Install
 
-Download the latest `.dmg` from [Releases](https://github.com/albinanto/ElTerminalo/releases), open it, and drag **El Terminalo** to your Applications folder.
+Download the latest `.dmg` from [Releases](https://github.com/albinantoab/ElTerminalo/releases/latest), open it, and drag **El Terminalo** to your Applications folder.
 
 ## Features
 
