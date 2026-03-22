@@ -3,11 +3,23 @@ package ptymanager
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"sync"
 	"time"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+const (
+	readBufSize      = 4096
+	batchChannelSize = 64
+	batchFlushBytes  = 8192
+	batchAccumCap    = 16384
+	batchInterval    = 16 * time.Millisecond
+)
+
+// ErrSessionNotFound is returned when an operation targets a session that does not exist.
+var ErrSessionNotFound = errors.New("session not found")
 
 // Manager manages multiple PTY sessions and streams output via Wails events.
 type Manager struct {
@@ -15,6 +27,7 @@ type Manager struct {
 	shell    string
 	sessions map[string]*Session
 	mu       sync.Mutex
+	wg       sync.WaitGroup
 }
 
 // NewManager creates a new PTY manager.
@@ -41,18 +54,21 @@ func (m *Manager) CreateSession(cols, rows int, cwd string) (string, error) {
 	m.sessions[session.ID] = session
 	m.mu.Unlock()
 
+	m.wg.Add(1)
 	go m.readLoop(session)
 
 	return session.ID, nil
 }
 
 func (m *Manager) readLoop(session *Session) {
-	dataCh := make(chan []byte, 64)
+	defer m.wg.Done()
+
+	dataCh := make(chan []byte, batchChannelSize)
 	doneCh := make(chan struct{})
 
-	// Reader goroutine — blocks on PTY read
+	// Reader goroutine -- blocks on PTY read
 	go func() {
-		buf := make([]byte, 4096)
+		buf := make([]byte, readBufSize)
 		for {
 			n, err := session.Read(buf)
 			if n > 0 {
@@ -67,9 +83,9 @@ func (m *Manager) readLoop(session *Session) {
 		}
 	}()
 
-	// Flusher — batches output and sends via Wails events
-	accum := make([]byte, 0, 16384)
-	ticker := time.NewTicker(16 * time.Millisecond)
+	// Flusher -- batches output and sends via Wails events
+	accum := make([]byte, 0, batchAccumCap)
+	ticker := time.NewTicker(batchInterval)
 	defer ticker.Stop()
 
 	flush := func() {
@@ -84,7 +100,7 @@ func (m *Manager) readLoop(session *Session) {
 		select {
 		case data := <-dataCh:
 			accum = append(accum, data...)
-			if len(accum) > 8192 {
+			if len(accum) > batchFlushBytes {
 				flush()
 			}
 		case <-ticker.C:
@@ -108,7 +124,7 @@ func (m *Manager) WriteToSession(sessionID string, data string) error {
 	session, ok := m.sessions[sessionID]
 	m.mu.Unlock()
 	if !ok {
-		return nil
+		return ErrSessionNotFound
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(data)
@@ -175,12 +191,13 @@ func (m *Manager) GetAllSessionCWDs() map[string]string {
 	return result
 }
 
-// CloseAll terminates all PTY sessions.
+// CloseAll terminates all PTY sessions and waits for readLoop goroutines to finish.
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for id, session := range m.sessions {
 		session.Close()
 		delete(m.sessions, id)
 	}
+	m.mu.Unlock()
+	m.wg.Wait()
 }

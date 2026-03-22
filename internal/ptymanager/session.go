@@ -4,26 +4,32 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 
 	"github.com/creack/pty"
 	"github.com/google/uuid"
 )
 
+const (
+	defaultCols = 80
+	defaultRows = 24
+)
+
 // Session manages a single PTY shell session.
 type Session struct {
-	ID     string
-	cmd    *exec.Cmd
-	ptmx   *os.File
-	closed bool
+	ID        string
+	cmd       *exec.Cmd
+	ptmx      *os.File
+	closeOnce sync.Once
 }
 
 // NewSession spawns a shell in a new PTY. If cwd is empty, defaults to home.
 func NewSession(shell string, cols, rows int, cwd string) (*Session, error) {
 	if cols < 1 {
-		cols = 80
+		cols = defaultCols
 	}
 	if rows < 1 {
-		rows = 24
+		rows = defaultRows
 	}
 
 	dir := cwd
@@ -78,15 +84,13 @@ func (s *Session) Resize(cols, rows int) error {
 	})
 }
 
-// Close terminates the PTY session.
+// Close terminates the PTY session. Safe to call multiple times.
 func (s *Session) Close() {
-	if s.closed {
-		return
-	}
-	s.closed = true
-	s.ptmx.Close()
-	if s.cmd.Process != nil {
-		s.cmd.Process.Kill()
-		s.cmd.Process.Wait()
-	}
+	s.closeOnce.Do(func() {
+		s.ptmx.Close()
+		if s.cmd.Process != nil {
+			s.cmd.Process.Kill()
+			s.cmd.Process.Wait()
+		}
+	})
 }
