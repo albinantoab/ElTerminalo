@@ -2,8 +2,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
-
-declare const window: any;
+import '../types/wails.d.ts';
 
 export interface XtermTheme {
   background: string;
