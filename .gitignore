@@ -30,3 +30,6 @@ Thumbs.db
 *.tmp
 /tmp/
 frontend/package.json.md5
+
+# Claude
+.claude/

@@ -1,16 +1,26 @@
 APP_NAME = ElTerminalo
 BINARY = elterminalo
 
-.PHONY: build run app clean
+.PHONY: build run app clean dev lint test
+
+dev:
+	wails dev
 
 build:
-	go build -o $(BINARY) .
+	wails build
 
 run: build
-	./$(BINARY)
+	./build/bin/$(BINARY)
 
-app: build
+app:
 	./scripts/build-app.sh
 
+lint:
+	golangci-lint run ./...
+	cd frontend && npx tsc --noEmit
+
+test:
+	go test ./...
+
 clean:
-	rm -rf $(BINARY) $(APP_NAME).app
+	rm -rf build/bin $(APP_NAME).app
