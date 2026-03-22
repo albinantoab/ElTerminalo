@@ -7,6 +7,20 @@
   <link rel="stylesheet" href="/src/styles/global.css" />
 </head>
 <body>
+  <!-- Splash screen -->
+  <div id="splash">
+    <div class="splash-content">
+      <img class="splash-logo" src="/src/images/logo.png" alt="" />
+      <div class="splash-text">
+        <span class="splash-title">El Terminalo</span>
+        <span class="splash-cursor">_</span>
+      </div>
+      <div class="splash-loader">
+        <div class="splash-loader-bar"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="app">
     <div id="titlebar">EL TERMINALO</div>
     <div id="tab-bar"></div>
@@ -14,6 +28,7 @@
     <div id="statusbar"></div>
     <div id="palette-overlay" class="hidden"></div>
     <div id="wizard-overlay" class="hidden"></div>
+    <div id="theme-wizard-overlay" class="hidden"></div>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>
