@@ -48,12 +48,47 @@ PLIST="build/bin/${APP}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${PLIST}" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${PLIST}" 2>/dev/null || true
 
-# ── Step 4: Code sign (ad-hoc if no identity provided) ──
-SIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
-echo "→ Code signing with identity: ${SIGN_IDENTITY}"
-codesign --force --deep --sign "${SIGN_IDENTITY}" "build/bin/${APP}" 2>/dev/null || {
-  echo "  ⚠ Code signing failed (app will still work but macOS may show warnings)"
-}
+# ── Step 4: Code sign ──
+SIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
+if [ -z "${SIGN_IDENTITY}" ]; then
+  # Auto-detect Developer ID Application certificate
+  SIGN_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+fi
+
+if [ -z "${SIGN_IDENTITY}" ]; then
+  echo "  ⚠ No Developer ID Application certificate found — using ad-hoc signing"
+  echo "  ⚠ Users will see Gatekeeper warnings. Install a Developer ID certificate for proper distribution."
+  codesign --force --deep --sign "-" "build/bin/${APP}" 2>/dev/null || true
+else
+  echo "→ Code signing with: ${SIGN_IDENTITY}"
+  codesign --force --options runtime --deep --sign "${SIGN_IDENTITY}" "build/bin/${APP}"
+  echo "✓ Code signed"
+
+  # ── Step 4b: Notarize ──
+  APPLE_ID="${NOTARIZE_APPLE_ID:-}"
+  TEAM_ID="${NOTARIZE_TEAM_ID:-}"
+  APP_PASSWORD="${NOTARIZE_PASSWORD:-}"
+
+  if [ -n "${APPLE_ID}" ] && [ -n "${TEAM_ID}" ] && [ -n "${APP_PASSWORD}" ]; then
+    echo "→ Creating ZIP for notarization..."
+    NOTARIZE_ZIP=$(mktemp -d)/notarize.zip
+    ditto -c -k --keepParent "build/bin/${APP}" "${NOTARIZE_ZIP}"
+
+    echo "→ Submitting for notarization (this may take a few minutes)..."
+    xcrun notarytool submit "${NOTARIZE_ZIP}" \
+      --apple-id "${APPLE_ID}" \
+      --team-id "${TEAM_ID}" \
+      --password "${APP_PASSWORD}" \
+      --wait
+
+    echo "→ Stapling notarization ticket..."
+    xcrun stapler staple "build/bin/${APP}"
+    echo "✓ Notarization complete"
+    rm -f "${NOTARIZE_ZIP}"
+  else
+    echo "  ⚠ Skipping notarization — set NOTARIZE_APPLE_ID, NOTARIZE_TEAM_ID, and NOTARIZE_PASSWORD to enable"
+  fi
+fi
 
 # ── Step 5: Create DMG ──
 echo "→ Creating DMG installer..."
