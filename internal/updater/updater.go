@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	githubRepo    = "albinanto/ElTerminalo"
+	githubRepo    = "albinantoab/ElTerminalo"
 	apiURL        = "https://api.github.com/repos/" + githubRepo + "/releases/latest"
 	checkTimeout  = 5 * time.Second
 	downloadTimeout = 5 * time.Minute
