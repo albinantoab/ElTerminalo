@@ -1,0 +1,186 @@
+package ptymanager
+
+import (
+	"context"
+	"encoding/base64"
+	"sync"
+	"time"
+
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
+)
+
+// Manager manages multiple PTY sessions and streams output via Wails events.
+type Manager struct {
+	ctx      context.Context
+	shell    string
+	sessions map[string]*Session
+	mu       sync.Mutex
+}
+
+// NewManager creates a new PTY manager.
+func NewManager(shell string) *Manager {
+	return &Manager{
+		shell:    shell,
+		sessions: make(map[string]*Session),
+	}
+}
+
+// SetContext sets the Wails runtime context (called during app startup).
+func (m *Manager) SetContext(ctx context.Context) {
+	m.ctx = ctx
+}
+
+// CreateSession spawns a new PTY and starts streaming output.
+func (m *Manager) CreateSession(cols, rows int, cwd string) (string, error) {
+	session, err := NewSession(m.shell, cols, rows, cwd)
+	if err != nil {
+		return "", err
+	}
+
+	m.mu.Lock()
+	m.sessions[session.ID] = session
+	m.mu.Unlock()
+
+	go m.readLoop(session)
+
+	return session.ID, nil
+}
+
+func (m *Manager) readLoop(session *Session) {
+	dataCh := make(chan []byte, 64)
+	doneCh := make(chan struct{})
+
+	// Reader goroutine — blocks on PTY read
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := session.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				dataCh <- data
+			}
+			if err != nil {
+				close(doneCh)
+				return
+			}
+		}
+	}()
+
+	// Flusher — batches output and sends via Wails events
+	accum := make([]byte, 0, 16384)
+	ticker := time.NewTicker(16 * time.Millisecond)
+	defer ticker.Stop()
+
+	flush := func() {
+		if len(accum) > 0 && m.ctx != nil {
+			encoded := base64.StdEncoding.EncodeToString(accum)
+			wailsRuntime.EventsEmit(m.ctx, "pty:output:"+session.ID, encoded)
+			accum = accum[:0]
+		}
+	}
+
+	for {
+		select {
+		case data := <-dataCh:
+			accum = append(accum, data...)
+			if len(accum) > 8192 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		case <-doneCh:
+			flush()
+			if m.ctx != nil {
+				wailsRuntime.EventsEmit(m.ctx, "pty:exit:"+session.ID, map[string]int{"exitCode": 0})
+			}
+			m.mu.Lock()
+			delete(m.sessions, session.ID)
+			m.mu.Unlock()
+			return
+		}
+	}
+}
+
+// WriteToSession sends input data (base64-encoded) to a PTY session.
+func (m *Manager) WriteToSession(sessionID string, data string) error {
+	m.mu.Lock()
+	session, ok := m.sessions[sessionID]
+	m.mu.Unlock()
+	if !ok {
+		return nil
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return err
+	}
+
+	_, err = session.Write(decoded)
+	return err
+}
+
+// ResizeSession changes a PTY's dimensions.
+func (m *Manager) ResizeSession(sessionID string, cols, rows int) {
+	m.mu.Lock()
+	session, ok := m.sessions[sessionID]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	session.Resize(cols, rows)
+}
+
+// CloseSession terminates a PTY session.
+func (m *Manager) CloseSession(sessionID string) {
+	m.mu.Lock()
+	session, ok := m.sessions[sessionID]
+	if ok {
+		delete(m.sessions, sessionID)
+	}
+	m.mu.Unlock()
+	if ok {
+		session.Close()
+	}
+}
+
+// GetSessionCWD returns the current working directory of a session's shell.
+func (m *Manager) GetSessionCWD(sessionID string) (string, error) {
+	m.mu.Lock()
+	session, ok := m.sessions[sessionID]
+	m.mu.Unlock()
+	if !ok {
+		return "", nil
+	}
+	return session.CWD()
+}
+
+// GetAllSessionCWDs returns CWDs for all active sessions.
+func (m *Manager) GetAllSessionCWDs() map[string]string {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.sessions))
+	sessions := make([]*Session, 0, len(m.sessions))
+	for id, s := range m.sessions {
+		ids = append(ids, id)
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+
+	result := make(map[string]string)
+	for i, s := range sessions {
+		if cwd, err := s.CWD(); err == nil {
+			result[ids[i]] = cwd
+		}
+	}
+	return result
+}
+
+// CloseAll terminates all PTY sessions.
+func (m *Manager) CloseAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, session := range m.sessions {
+		session.Close()
+		delete(m.sessions, id)
+	}
+}
