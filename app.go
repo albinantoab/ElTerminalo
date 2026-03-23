@@ -203,6 +203,11 @@ func (a *App) UpdateCommand(scope, oldName, newName, newCommand, newDescription,
 	return a.cmds.Update(scope, oldName, newName, newCommand, newDescription, newShortcut, cwd)
 }
 
+// GetAllSessionStatuses returns the status of all active PTY sessions.
+func (a *App) GetAllSessionStatuses() map[string]ptymanager.SessionStatus {
+	return a.ptyMgr.GetAllSessionStatuses()
+}
+
 // GetVersion returns the current application version.
 func (a *App) GetVersion() string {
 	return Version

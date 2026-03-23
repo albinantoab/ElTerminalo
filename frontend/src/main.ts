@@ -5,6 +5,7 @@ import { CommandPalette } from './palette/CommandPalette';
 import { CommandWizard } from './wizard/CommandWizard';
 import { ThemeWizard } from './wizard/ThemeWizard';
 import { StateManager } from './state/StateManager';
+import { StatusModal } from './status/StatusModal';
 import { escHtml, generateId, waitForLayout, utf8ToBase64, bytesToBase64 } from './utils';
 import {
   MAX_TABS, DOUBLE_CLICK_DELAY_MS, MIN_SPLIT_RATIO, MAX_SPLIT_RATIO,
@@ -28,6 +29,7 @@ class ElTerminalo {
   private wizard!: CommandWizard;
   private themeWizard!: ThemeWizard;
   private stateManager!: StateManager;
+  private statusModal!: StatusModal;
 
   // Current tab helpers
   private get tab(): Tab { return this.tabs[this.activeTabIndex]; }
@@ -81,6 +83,17 @@ class ElTerminalo {
       },
       focusActivePane: () => {
         if (this.panes[this.activeIndex]) this.panes[this.activeIndex].pane.focus();
+      },
+    });
+
+    const statusOverlay = document.getElementById('status-overlay')!;
+    this.statusModal = new StatusModal(statusOverlay, {
+      getTabs: () => this.tabs,
+      getActiveTabIndex: () => this.activeTabIndex,
+      focusActivePane: () => this.focusActivePane(),
+      switchToPane: (tabIndex, paneIndex) => {
+        this.switchToTab(tabIndex);
+        requestAnimationFrame(() => this.setActive(paneIndex));
       },
     });
 
@@ -582,9 +595,7 @@ class ElTerminalo {
       <div class="status-right">
         <span class="status-key">Cmd + P</span><span class="status-label">commands</span>
         <span class="status-sep">·</span>
-        <span class="status-key">Cmd + T</span><span class="status-label">new tab</span>
-        <span class="status-sep">·</span>
-        <span class="status-key">Cmd + W</span><span class="status-label">close tab</span>
+        <span class="status-key">Cmd + I</span><span class="status-label">status</span>
         <span class="status-sep">·</span>
         <span class="status-key">Cmd + B</span><span class="status-label">vsplit</span>
         <span class="status-sep">·</span>
@@ -665,6 +676,7 @@ class ElTerminalo {
       { name: 'Close Pane', desc: 'Close the active pane', category: 'Panes', shortcutDisplay: 'Cmd+X', action: () => this.closeActivePane() },
       { name: 'Next Pane', desc: 'Focus the next pane', category: 'Panes', shortcutDisplay: 'Cmd+→', action: () => this.navigateSpatial('right') },
       { name: 'Previous Pane', desc: 'Focus the previous pane', category: 'Panes', shortcutDisplay: 'Cmd+←', action: () => this.navigateSpatial('left') },
+      { name: 'Session Status', desc: 'Show running commands across all panes', category: 'General', shortcutDisplay: 'Cmd+I', action: () => { this.closePaletteIfOpen(); this.statusModal.show(); } },
       { name: 'Command Palette', desc: 'Open command palette', category: 'General', shortcutDisplay: 'Cmd+P', action: () => this.palette.show() },
       { name: 'Clear Terminal', desc: 'Clear the active terminal', category: 'General', shortcutDisplay: 'Cmd+L', action: () => this.clearActiveTerminal() },
       { name: 'Create Command', desc: 'Create a custom command', category: 'Commands', shortcutDisplay: 'Cmd+Shift+C', action: () => { this.palette.hide(); const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || ''; this.wizard.show(input); } },
@@ -755,6 +767,13 @@ class ElTerminalo {
   private handleKeydown(e: KeyboardEvent): void {
     const isMeta = e.metaKey;
 
+    // Status modal takes highest priority after wizards
+    if (this.statusModal.isOpen()) {
+      e.stopPropagation();
+      this.statusModal.handleKeydown(e);
+      return;
+    }
+
     // Theme wizard takes highest priority
     if (this.themeWizard.isOpen()) {
       this.themeWizard.handleKeydown(e);
@@ -813,6 +832,7 @@ class ElTerminalo {
       }
 
       switch (e.key.toLowerCase()) {
+        case 'i': e.preventDefault(); this.statusModal.show(); return;
         case 'p': e.preventDefault(); this.palette.show(); return;
         case 't': e.preventDefault(); this.createTab(); return;
         case 'w': e.preventDefault(); this.closeTab(this.activeTabIndex); return;

@@ -21,6 +21,14 @@ const (
 // ErrSessionNotFound is returned when an operation targets a session that does not exist.
 var ErrSessionNotFound = errors.New("session not found")
 
+// SessionStatus describes the current state of a PTY session.
+type SessionStatus struct {
+	SessionID string `json:"sessionId"`
+	CWD       string `json:"cwd"`
+	Command   string `json:"command"`
+	IsIdle    bool   `json:"isIdle"`
+}
+
 // Manager manages multiple PTY sessions and streams output via Wails events.
 type Manager struct {
 	ctx      context.Context
@@ -196,6 +204,31 @@ func (m *Manager) GetAllSessionCWDs() map[string]string {
 	for i, s := range sessions {
 		if cwd, err := s.CWD(); err == nil {
 			result[ids[i]] = cwd
+		}
+	}
+	return result
+}
+
+// GetAllSessionStatuses returns the status of all active sessions.
+func (m *Manager) GetAllSessionStatuses() map[string]SessionStatus {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.sessions))
+	sessions := make([]*Session, 0, len(m.sessions))
+	for id, s := range m.sessions {
+		ids = append(ids, id)
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+
+	result := make(map[string]SessionStatus)
+	for i, s := range sessions {
+		cwd, _ := s.CWD()
+		cmd := s.ForegroundProcess()
+		result[ids[i]] = SessionStatus{
+			SessionID: ids[i],
+			CWD:       cwd,
+			Command:   cmd,
+			IsIdle:    cmd == "",
 		}
 	}
 	return result
