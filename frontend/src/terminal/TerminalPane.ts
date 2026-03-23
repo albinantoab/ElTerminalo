@@ -66,8 +66,15 @@ export class TerminalPane {
     this.terminal.open(container);
 
     // Block Ctrl+L from reaching the shell — only Cmd+L should clear
+    // Send CSI u sequence for Shift+Enter so apps like Claude CLI can
+    // distinguish it from plain Enter (matches iTerm / Kitty behaviour)
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type === 'keydown' && e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'l') {
+        return false;
+      }
+      if (e.type === 'keydown' && e.shiftKey && e.key === 'Enter') {
+        e.preventDefault();
+        window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x1b[13;2u'));
         return false;
       }
       return true;
