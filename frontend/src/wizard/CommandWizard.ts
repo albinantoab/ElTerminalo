@@ -129,16 +129,28 @@ export class CommandWizard {
       return true;
     }
 
-    if (e.key === 'Enter' && this.step >= 1) {
+    // Step 1 (command textarea): Enter advances, Shift+Enter inserts newline
+    if (this.step === 1 && e.key === 'Enter') {
+      if (e.shiftKey) {
+        // Don't preventDefault — let Shift+Enter insert newline in textarea
+        return true;
+      }
+      e.preventDefault();
+      const val = (document.getElementById('wizard-field') as HTMLTextAreaElement)?.value.trim() || '';
+      if (!val) return true;
+      this.data.command = val;
+      this.step = 2;
+      const firstLine = val.split('\n')[0];
+      this.data.name = firstLine.split(' ').slice(0, 3).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      this.render();
+      return true;
+    }
+
+    // Steps 2-3: Enter advances
+    if (e.key === 'Enter' && this.step >= 2 && this.step <= 3) {
       e.preventDefault();
       const val = (document.getElementById('wizard-field') as HTMLInputElement)?.value.trim() || '';
-      if (this.step === 1) {
-        if (!val) return true;
-        this.data.command = val;
-        this.step = 2;
-        this.data.name = val.split(' ').slice(0, 3).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-        this.render();
-      } else if (this.step === 2) {
+      if (this.step === 2) {
         if (!val) return true;
         this.data.name = val;
         this.step = 3;
@@ -166,7 +178,7 @@ export class CommandWizard {
       ).join('');
       content = `<div class="wizard-title">Create Command</div><div class="wizard-step-label">Where should this command be saved?</div><div class="wizard-scope-btns">${btns}</div><div class="wizard-hint">← → select · enter confirm · esc cancel</div>`;
     } else if (this.step === 1) {
-      content = `<div class="wizard-title">Create Command — ${this.data.scope}</div><div class="wizard-step-label">Command to execute</div><input class="wizard-input" id="wizard-field" type="text" placeholder="e.g. npm run build" value="${escHtml(this.data.command)}" /><div class="wizard-hint">enter to continue · esc to cancel</div>`;
+      content = `<div class="wizard-title">Create Command — ${this.data.scope}</div><div class="wizard-step-label">Command to execute</div><textarea class="wizard-input wizard-textarea" id="wizard-field" placeholder="e.g. npm run build" rows="3">${escHtml(this.data.command)}</textarea><div class="wizard-hint">shift+enter for new line · enter to continue · esc to cancel</div>`;
     } else if (this.step === 2) {
       content = `<div class="wizard-title">Create Command — ${this.data.scope}</div><div class="wizard-step-label">Display name</div><input class="wizard-input" id="wizard-field" type="text" placeholder="e.g. Build Project" value="${escHtml(this.data.name)}" /><div class="wizard-hint">enter to continue · esc to cancel</div>`;
     } else if (this.step === 3) {

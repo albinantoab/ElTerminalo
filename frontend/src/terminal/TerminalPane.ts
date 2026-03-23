@@ -285,16 +285,79 @@ export class TerminalPane {
     this.ctxActions = actions;
   }
 
-  /** Return the text on the current cursor line, stripped of the shell prompt. */
+  /** Return the text on the current cursor line(s), stripped of the shell prompt.
+   *  Handles soft-wrapped lines and shell continuation lines (ending with \). */
   getCurrentInput(): string {
     const buf = this.terminal.buffer.active;
-    const line = buf.getLine(buf.cursorY + buf.baseY);
-    if (!line) return '';
-    const full = line.translateToString(true);
+    const cursorAbsY = buf.cursorY + buf.baseY;
+
+    // Strip right-side prompt decorations (box-drawing chars, arrows, etc.)
+    // that shells like starship/p10k render after the command text
+    const stripRight = (s: string) =>
+      s.replace(/[\s─│╮╯╰╭┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬➤❯→←↑↓›»▸▶❱⮞⟩]+$/, '');
+
+    // Walk backwards to find the start of the input:
+    // through soft-wrapped lines (isWrapped) and continuation lines (prev ends with \)
+    let startY = cursorAbsY;
+    while (startY > 0) {
+      const line = buf.getLine(startY);
+      if (!line) break;
+      if (line.isWrapped) {
+        startY--;
+        continue;
+      }
+      const above = buf.getLine(startY - 1);
+      if (above && stripRight(above.translateToString(true)).endsWith('\\')) {
+        startY--;
+        continue;
+      }
+      break;
+    }
+
+    // Strip the shell prompt from the first non-wrapped line
+    const firstLine = buf.getLine(startY);
+    if (!firstLine) return '';
+    const firstText = stripRight(firstLine.translateToString(true));
     // Strip common shell prompts — covers $, %, #, > and unicode arrows
     // used by modern themes (starship, p10k, oh-my-zsh, etc.)
-    const m = full.match(/^.*?[\$%#>➤❯→›»▸▶❱⮞⟩]\s?(.*)$/);
-    return m ? m[1].trim() : '';
+    const m = firstText.match(/^.*?[\$%#>➤❯→›»▸▶❱⮞⟩]\s?(.*)$/);
+    const firstInput = (m ? m[1] : firstText).trimEnd();
+
+    // Collect lines from startY to cursorAbsY, merging soft-wrapped lines
+    const lines: string[] = [];
+    let current = firstInput;
+    for (let y = startY + 1; y <= cursorAbsY; y++) {
+      const line = buf.getLine(y);
+      if (!line) continue;
+      const text = stripRight(line.translateToString(true));
+      if (line.isWrapped) {
+        current += text;
+      } else {
+        lines.push(current);
+        current = text;
+      }
+    }
+    lines.push(current);
+
+    // Walk forward past cursor to collect remaining continuation lines
+    if (lines[lines.length - 1].endsWith('\\')) {
+      let y = cursorAbsY + 1;
+      while (y < buf.length) {
+        const line = buf.getLine(y);
+        if (!line) break;
+        const text = stripRight(line.translateToString(true));
+        if (!text) break;
+        if (line.isWrapped) {
+          lines[lines.length - 1] += text;
+        } else {
+          lines.push(text);
+        }
+        if (!lines[lines.length - 1].endsWith('\\')) break;
+        y++;
+      }
+    }
+
+    return lines.join('\n').trim();
   }
 
   focus(): void {

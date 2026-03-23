@@ -98,21 +98,31 @@ export class CommandPalette {
     const builtIn = this.callbacks.getBuiltInCommands();
     const customCommands = this.callbacks.getCustomCommands();
 
-    const custom: PaletteCommand[] = customCommands.map(c => ({
-      name: c.name,
-      desc: c.description || c.command,
-      category: c.scope === 'local' ? 'Project' : 'Global',
-      shortcutDisplay: c.shortcut || '',
-      isCustom: true,
-      scope: c.scope,
-      command: c.command,
-      shortcutKey: c.shortcut || '',
-      action: (metaKey?: boolean) => {
-        const sessionId = this.callbacks.getActiveSessionId();
-        if (!sessionId) return;
-        window.go.main.App.WriteToSession(sessionId, utf8ToBase64(c.command + (metaKey ? '' : '\n')));
-      },
-    }));
+    const custom: PaletteCommand[] = customCommands.map(c => {
+      const isMultiline = c.command.includes('\n');
+      const cmdPreview = isMultiline ? c.command.split('\n')[0] + ' …' : c.command;
+      return {
+        name: c.name,
+        desc: c.description || cmdPreview,
+        category: c.scope === 'local' ? 'Project' : 'Global',
+        shortcutDisplay: c.shortcut || '',
+        isCustom: true,
+        scope: c.scope,
+        command: c.command,
+        shortcutKey: c.shortcut || '',
+        action: (metaKey?: boolean) => {
+          const sessionId = this.callbacks.getActiveSessionId();
+          if (!sessionId) return;
+          if (isMultiline) {
+            // Use bracketed paste so shells treat multiline text as a single paste
+            const data = '\x1b[200~' + c.command + '\x1b[201~' + (metaKey ? '' : '\n');
+            window.go.main.App.WriteToSession(sessionId, utf8ToBase64(data));
+          } else {
+            window.go.main.App.WriteToSession(sessionId, utf8ToBase64(c.command + (metaKey ? '' : '\n')));
+          }
+        },
+      };
+    });
 
     return [...custom, ...builtIn];
   }

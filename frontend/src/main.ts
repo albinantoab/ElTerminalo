@@ -849,7 +849,12 @@ class ElTerminalo {
           if (c.shortcut && c.shortcut.toLowerCase() === pressed.toLowerCase()) {
             e.preventDefault(); e.stopImmediatePropagation();
             const ap = this.panes[this.activeIndex];
-            if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(c.command + '\n'));
+            if (ap) {
+              const data = c.command.includes('\n')
+                ? '\x1b[200~' + c.command + '\x1b[201~\n'
+                : c.command + '\n';
+              window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(data));
+            }
             return;
           }
         }

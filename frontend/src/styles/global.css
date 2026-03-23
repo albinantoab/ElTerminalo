@@ -692,7 +692,7 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  max-height: 360px;
+  max-height: 420px;
 }
 
 .wizard-title {
@@ -721,6 +721,13 @@ html, body {
 
 .wizard-input:focus {
   border-color: var(--accent);
+}
+
+.wizard-textarea {
+  resize: none;
+  flex: 1;
+  min-height: 180px;
+  line-height: 1.4;
 }
 
 .wizard-scope-btns {
@@ -774,6 +781,10 @@ html, body {
   font-size: 11px;
   color: #6b7280;
   text-align: center;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Theme Wizard */
