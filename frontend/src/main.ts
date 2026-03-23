@@ -667,7 +667,7 @@ class ElTerminalo {
       { name: 'Previous Pane', desc: 'Focus the previous pane', category: 'Panes', shortcutDisplay: 'Cmd+←', action: () => this.navigateSpatial('left') },
       { name: 'Command Palette', desc: 'Open command palette', category: 'General', shortcutDisplay: 'Cmd+P', action: () => this.palette.show() },
       { name: 'Clear Terminal', desc: 'Clear the active terminal', category: 'General', shortcutDisplay: 'Cmd+L', action: () => this.clearActiveTerminal() },
-      { name: 'Create Command', desc: 'Create a custom command', category: 'Commands', shortcutDisplay: 'Cmd+Shift+C', action: () => { this.palette.hide(); this.wizard.show(); } },
+      { name: 'Create Command', desc: 'Create a custom command', category: 'Commands', shortcutDisplay: 'Cmd+Shift+C', action: () => { this.palette.hide(); const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || ''; this.wizard.show(input); } },
       ...this.themes.map(t => ({
         name: `Theme: ${t.name}`, desc: `Switch to ${t.name} theme`, category: 'Appearance',
         isTheme: true,
@@ -805,7 +805,12 @@ class ElTerminalo {
 
     // Built-in shortcuts (Cmd-based)
     if (isMeta) {
-      if (e.shiftKey && e.key.toLowerCase() === 'c') { e.preventDefault(); this.wizard.show(); return; }
+      if (e.shiftKey && e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || '';
+        this.wizard.show(input);
+        return;
+      }
 
       switch (e.key.toLowerCase()) {
         case 'p': e.preventDefault(); this.palette.show(); return;

@@ -26,10 +26,10 @@ export class CommandWizard {
     this.callbacks = callbacks;
   }
 
-  show(): void {
+  show(prefillCommand?: string): void {
     this.open = true;
     this.step = 0;
-    this.data = { scope: '', command: '', name: '', description: '', shortcut: '' };
+    this.data = { scope: '', command: prefillCommand || '', name: '', description: '', shortcut: '' };
     this.shortcutConflict = '';
     this.capturingShortcut = false;
     this.editingOriginalName = null;

@@ -274,6 +274,18 @@ export class TerminalPane {
     this.ctxActions = actions;
   }
 
+  /** Return the text on the current cursor line, stripped of the shell prompt. */
+  getCurrentInput(): string {
+    const buf = this.terminal.buffer.active;
+    const line = buf.getLine(buf.cursorY + buf.baseY);
+    if (!line) return '';
+    const full = line.translateToString(true);
+    // Strip common shell prompts — covers $, %, #, > and unicode arrows
+    // used by modern themes (starship, p10k, oh-my-zsh, etc.)
+    const m = full.match(/^.*?[\$%#>➤❯→›»▸▶❱⮞⟩]\s?(.*)$/);
+    return m ? m[1].trim() : '';
+  }
+
   focus(): void {
     this.terminal.focus();
   }
