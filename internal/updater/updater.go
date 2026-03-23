@@ -29,6 +29,17 @@ type UpdateInfo struct {
 	URL        string `json:"url"`
 }
 
+// CleanupStaleBackup removes any leftover .app.backup from a prior update.
+// Safe to call on every startup.
+func CleanupStaleBackup() {
+	appPath, err := currentAppPath()
+	if err != nil {
+		return
+	}
+	backupPath := appPath + ".backup"
+	os.RemoveAll(backupPath)
+}
+
 // Check queries GitHub for the latest release and compares with the current version.
 func Check(currentVersion string) UpdateInfo {
 	info := UpdateInfo{CurrentVer: currentVersion}

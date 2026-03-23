@@ -48,6 +48,9 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.ptyMgr.SetContext(ctx)
 
+	// Clean up any stale backup from a prior update
+	updater.CleanupStaleBackup()
+
 	// Restore saved window geometry
 	if g := a.cfg.LoadWindowGeometry(); g != nil {
 		wailsRuntime.WindowSetPosition(ctx, g.X, g.Y)
