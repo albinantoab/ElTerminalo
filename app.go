@@ -21,12 +21,13 @@ var Version = "dev"
 
 // App is the main Wails-bound application struct.
 type App struct {
-	ctx     context.Context
-	ptyMgr  *ptymanager.Manager
-	shell   string
-	cfg     *config.Config
-	cmds    *commands.Store
-	dropDir string
+	ctx            context.Context
+	ptyMgr         *ptymanager.Manager
+	shell          string
+	cfg            *config.Config
+	cmds           *commands.Store
+	dropDir        string
+	closeConfirmed bool
 }
 
 // NewApp creates a new App instance.
@@ -56,6 +57,21 @@ func (a *App) startup(ctx context.Context) {
 		wailsRuntime.WindowSetPosition(ctx, g.X, g.Y)
 		wailsRuntime.WindowSetSize(ctx, g.Width, g.Height)
 	}
+}
+
+func (a *App) beforeClose(ctx context.Context) (prevent bool) {
+	if a.closeConfirmed {
+		return false // allow close
+	}
+	// Ask the frontend to show a confirmation dialog
+	wailsRuntime.EventsEmit(ctx, "app:confirm-close")
+	return true // prevent close for now
+}
+
+// ConfirmQuit is called by the frontend after the user confirms they want to quit.
+func (a *App) ConfirmQuit() {
+	a.closeConfirmed = true
+	wailsRuntime.Quit(a.ctx)
 }
 
 func (a *App) shutdown(ctx context.Context) {

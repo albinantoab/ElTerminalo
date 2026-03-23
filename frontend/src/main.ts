@@ -127,6 +127,9 @@ class ElTerminalo {
     this.checkForUpdate();
     setInterval(() => this.checkForUpdate(), 6 * 60 * 60 * 1000);
 
+    // Listen for close confirmation request from the Go backend
+    window.runtime.EventsOn('app:confirm-close', () => this.showCloseConfirmation());
+
     // Handle file drops — read via HTML5 API, save to temp via Go
     document.addEventListener('dragover', (e) => e.preventDefault(), true);
     document.addEventListener('drop', async (e) => {
@@ -612,6 +615,43 @@ class ElTerminalo {
         this.promptUpdate();
       });
     }
+  }
+
+  private showCloseConfirmation(): void {
+    // Don't stack multiple dialogs
+    if (document.querySelector('.close-overlay')) return;
+
+    const activeSessions = this.tabs.reduce((n, t) => n + t.panes.length, 0);
+
+    const overlay = document.createElement('div');
+    overlay.className = 'update-overlay close-overlay';
+    overlay.innerHTML = `<div class="update-dialog">
+      <div class="update-dialog-title">Quit El Terminalo?</div>
+      <div class="update-dialog-body">
+        ${activeSessions} active session${activeSessions !== 1 ? 's' : ''} will be terminated.
+      </div>
+      <div class="update-dialog-actions">
+        <button class="theme-btn theme-btn-cancel" id="close-cancel">Cancel</button>
+        <button class="theme-btn theme-btn-save" id="close-confirm" style="background:#f85149;border-color:#f85149;">Quit</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+
+    const dismiss = () => overlay.remove();
+
+    document.getElementById('close-cancel')?.addEventListener('click', dismiss);
+    document.getElementById('close-confirm')?.addEventListener('click', () => {
+      this.stateManager.save();
+      window.go.main.App.ConfirmQuit();
+    });
+
+    // Allow Escape to cancel
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { dismiss(); document.removeEventListener('keydown', onKey, true); }
+      if (e.key === 'Enter') { this.stateManager.save(); window.go.main.App.ConfirmQuit(); }
+      e.stopPropagation();
+    };
+    document.addEventListener('keydown', onKey, true);
   }
 
   private async promptUpdate(): Promise<void> {
