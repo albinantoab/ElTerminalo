@@ -753,7 +753,7 @@ class ElTerminalo {
   // --- Keyboard ---
 
   private handleKeydown(e: KeyboardEvent): void {
-    const isMeta = e.metaKey || e.ctrlKey;
+    const isMeta = e.metaKey;
 
     // Theme wizard takes highest priority
     if (this.themeWizard.isOpen()) {
@@ -795,6 +795,12 @@ class ElTerminalo {
           }
         }
       }
+    }
+
+    // Block Ctrl+L so it doesn't clear via the shell — only Cmd+L should clear
+    if (e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'l') {
+      e.preventDefault();
+      return;
     }
 
     // Built-in shortcuts (Cmd-based)

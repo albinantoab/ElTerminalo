@@ -65,6 +65,14 @@ export class TerminalPane {
 
     this.terminal.open(container);
 
+    // Block Ctrl+L from reaching the shell — only Cmd+L should clear
+    this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.type === 'keydown' && e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'l') {
+        return false;
+      }
+      return true;
+    });
+
     // Custom context menu — xterm renders on canvas so Wails'
     // default context menu can't see terminal selections.
     this.initContextMenu(container);

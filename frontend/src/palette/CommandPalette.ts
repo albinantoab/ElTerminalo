@@ -49,7 +49,7 @@ export class CommandPalette {
 
   handleKeydown(e: KeyboardEvent): boolean {
     if (!this.open) return false;
-    const isMeta = e.metaKey || e.ctrlKey;
+    const isMeta = e.metaKey;
 
     if (e.key === 'Escape') {
       e.preventDefault();
