@@ -79,7 +79,6 @@ func (s *Store) Save(scope, name, command, description, shortcut, cwd string) er
 	// Read existing
 	existing := s.readFile(path, scope)
 
-	// Append new command
 	newCmd := Command{
 		Name:        name,
 		Command:     command,
@@ -87,7 +86,19 @@ func (s *Store) Save(scope, name, command, description, shortcut, cwd string) er
 		Shortcut:    shortcut,
 		Scope:       scope,
 	}
-	existing = append(existing, newCmd)
+
+	// Replace if same name exists, otherwise append
+	found := false
+	for i, c := range existing {
+		if c.Name == name {
+			existing[i] = newCmd
+			found = true
+			break
+		}
+	}
+	if !found {
+		existing = append(existing, newCmd)
+	}
 
 	return s.writeFile(path, existing)
 }
@@ -200,5 +211,9 @@ func (s *Store) writeFile(path string, cmds []Command) error {
 		return err
 	}
 	os.MkdirAll(filepath.Dir(path), 0755)
-	return os.WriteFile(path, data, 0644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

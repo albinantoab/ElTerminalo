@@ -574,7 +574,7 @@ class ElTerminalo {
 
   private renderStatusBar(): void {
     const updateBadge = this.updateInfo?.available
-      ? `<a class="status-update" id="status-update-link">Update v${this.updateInfo.latestVersion} available</a><span class="status-sep">·</span>`
+      ? `<a class="status-update" id="status-update-link">Update v${escHtml(this.updateInfo.latestVersion)} available</a><span class="status-sep">·</span>`
       : '';
 
     this.statusbar.innerHTML = `
@@ -612,7 +612,7 @@ class ElTerminalo {
     overlay.innerHTML = `<div class="update-dialog">
       <div class="update-dialog-title">Update Available</div>
       <div class="update-dialog-body">
-        v${this.updateInfo.latestVersion} is ready to install.<br>
+        v${escHtml(this.updateInfo.latestVersion)} is ready to install.<br>
         The app will restart automatically.
       </div>
       <div class="update-dialog-actions">
@@ -747,7 +747,7 @@ class ElTerminalo {
 
   private clearActiveTerminal(): void {
     const ap = this.panes[this.activeIndex];
-    if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('clear\n'));
+    if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('\x0c'));
   }
 
   // --- Keyboard ---

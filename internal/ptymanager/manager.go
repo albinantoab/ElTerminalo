@@ -106,6 +106,16 @@ func (m *Manager) readLoop(session *Session) {
 		case <-ticker.C:
 			flush()
 		case <-doneCh:
+			// Drain any remaining buffered data from the reader goroutine
+		drain:
+			for {
+				select {
+				case data := <-dataCh:
+					accum = append(accum, data...)
+				default:
+					break drain
+				}
+			}
 			flush()
 			if m.ctx != nil {
 				wailsRuntime.EventsEmit(m.ctx, "pty:exit:"+session.ID, map[string]int{"exitCode": 0})

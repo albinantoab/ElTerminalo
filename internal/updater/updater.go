@@ -131,7 +131,12 @@ func ApplyUpdate() error {
 
 	// 7. Relaunch
 	cmd := exec.Command("open", "-n", appPath)
-	cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to relaunch: %w", err)
+	}
+
+	// Clean up temp directory explicitly (defer won't run after os.Exit)
+	os.RemoveAll(tmpDir)
 
 	// Exit current process
 	os.Exit(0)
@@ -286,20 +291,32 @@ func copyDir(src, dst string) error {
 		}
 		target := filepath.Join(dst, rel)
 
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
+		// Use Lstat to detect symlinks (Walk dereferences them)
+		linfo, err := os.Lstat(path)
+		if err != nil {
+			return err
 		}
 
-		// Handle symlinks
-		if info.Mode()&os.ModeSymlink != 0 {
+		if linfo.Mode()&os.ModeSymlink != 0 {
 			link, err := os.Readlink(path)
 			if err != nil {
 				return err
 			}
-			return os.Symlink(link, target)
+			if err := os.Symlink(link, target); err != nil {
+				return err
+			}
+			// Skip descending into symlinked directories
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
-		return copyFile(path, target, info.Mode())
+		if linfo.IsDir() {
+			return os.MkdirAll(target, linfo.Mode())
+		}
+
+		return copyFile(path, target, linfo.Mode())
 	})
 }
 

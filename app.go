@@ -31,7 +31,10 @@ type App struct {
 
 // NewApp creates a new App instance.
 func NewApp(shell string, cfg *config.Config) *App {
-	dropDir, _ := os.MkdirTemp("", "elterminalo-drops-*")
+	dropDir, err := os.MkdirTemp("", "elterminalo-drops-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot create drop directory: %v\n", err)
+	}
 	return &App{
 		shell:   shell,
 		ptyMgr:  ptymanager.NewManager(shell),
@@ -219,6 +222,13 @@ func (a *App) ApplyUpdate() error {
 // and returns the full path. Used for HTML5 drag-and-drop.
 // Files are cleaned up when the app shuts down.
 func (a *App) SaveDroppedFile(fileName string, dataBase64 string) (string, error) {
+	if a.dropDir == "" {
+		return "", fmt.Errorf("drop directory not available")
+	}
+
+	// Sanitize filename to prevent path traversal
+	fileName = filepath.Base(fileName)
+
 	data, err := base64.StdEncoding.DecodeString(dataBase64)
 	if err != nil {
 		return "", fmt.Errorf("invalid base64 data: %w", err)

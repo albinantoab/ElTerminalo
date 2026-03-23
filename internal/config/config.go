@@ -88,5 +88,9 @@ func (c *Config) LoadWindowGeometry() *WindowGeometry {
 	if g.Width < 400 || g.Height < 300 {
 		return nil
 	}
+	// Reject positions that are unreasonably far off-screen
+	if g.X < -10000 || g.X > 20000 || g.Y < -10000 || g.Y > 20000 {
+		return nil
+	}
 	return &g
 }

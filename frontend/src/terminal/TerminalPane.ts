@@ -41,6 +41,7 @@ export class TerminalPane {
   private container: HTMLElement;
   private resizeObserver: ResizeObserver;
   private eventCleanup: (() => void) | null = null;
+  private exitEventCleanup: (() => void) | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private lastCols: number = 0;
   private lastRows: number = 0;
@@ -117,7 +118,7 @@ export class TerminalPane {
     });
 
     // Subscribe to PTY exit
-    window.runtime.EventsOn('pty:exit:' + this.sessionId, () => {
+    this.exitEventCleanup = window.runtime.EventsOn('pty:exit:' + this.sessionId, () => {
       this.terminal.write('\r\n[Process exited]\r\n');
     });
 
@@ -153,11 +154,14 @@ export class TerminalPane {
     }
     this.resizeTimer = setTimeout(() => {
       window.go.main.App.ResizeSession(this.sessionId, cols, rows);
-      // Send Ctrl+L (clear/redraw) to clean up stale prompt lines
-      const ctrlL = btoa('\x0c');
-      window.go.main.App.WriteToSession(this.sessionId, ctrlL);
+      // Clear stale prompt artifacts after resize — only in normal buffer mode.
+      // TUI apps (vim, htop, etc.) use the alternate screen buffer
+      // and handle SIGWINCH-based redraws themselves.
+      if (this.terminal.buffer.active.type === 'normal') {
+        window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x0c'));
+      }
       this.resizeTimer = null;
-    }, 100);
+    }, 150);
   }
 
   async getCWD(): Promise<string> {
@@ -308,6 +312,9 @@ export class TerminalPane {
     this.resizeObserver.disconnect();
     if (this.eventCleanup) {
       this.eventCleanup();
+    }
+    if (this.exitEventCleanup) {
+      this.exitEventCleanup();
     }
     this.terminal.dispose();
   }

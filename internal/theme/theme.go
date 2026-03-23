@@ -117,7 +117,11 @@ func SaveUserThemes(configDir string, themes []Theme) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // Merged returns built-in themes with user themes appended.

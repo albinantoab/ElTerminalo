@@ -11,7 +11,13 @@ set -e
 VERSION="${1:-$(cat VERSION 2>/dev/null || echo "0.1.0")}"
 APP_NAME="ElTerminalo"
 APP="${APP_NAME}.app"
-DMG="${APP_NAME}-${VERSION}-macos-arm64.dmg"
+ARCH=$(uname -m)
+case "$ARCH" in
+  arm64)  ARCH_LABEL="arm64" ;;
+  x86_64) ARCH_LABEL="amd64" ;;
+  *)      ARCH_LABEL="$ARCH" ;;
+esac
+DMG="${APP_NAME}-${VERSION}-macos-${ARCH_LABEL}.dmg"
 RELEASE_DIR="release"
 LOGO="assets/logo.png"
 WAILS="${HOME}/go/bin/wails"
@@ -110,16 +116,14 @@ rm -rf "${DMG_STAGING}"
 echo "✓ DMG created"
 
 # ── Step 6: Create ZIP (used by auto-updater) ──
-ZIP="${APP_NAME}-${VERSION}-macos-arm64.zip"
+ZIP="${APP_NAME}-${VERSION}-macos-${ARCH_LABEL}.zip"
 echo "→ Creating ZIP for auto-updater..."
-cd "build/bin" && zip -qr "../../${RELEASE_DIR}/${ZIP}" "${APP}" && cd ../..
+(cd "build/bin" && zip -qr "../../${RELEASE_DIR}/${ZIP}" "${APP}")
 echo "✓ ZIP created"
 
-# ── Step 8: Create checksums ──
+# ── Step 7: Create checksums ──
 echo "→ Generating checksums..."
-cd "${RELEASE_DIR}"
-shasum -a 256 "${DMG}" "${ZIP}" > checksums-sha256.txt
-cd ..
+(cd "${RELEASE_DIR}" && shasum -a 256 "${DMG}" "${ZIP}" > checksums-sha256.txt)
 
 # ── Done ──
 DMG_SIZE=$(du -h "${RELEASE_DIR}/${DMG}" | cut -f1 | xargs)
