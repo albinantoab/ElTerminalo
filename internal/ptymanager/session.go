@@ -41,7 +41,7 @@ func NewSession(shell string, cols, rows int, cwd string) (*Session, error) {
 		dir, _ = os.UserHomeDir()
 	}
 
-	cmd := exec.Command(shell)
+	cmd := exec.Command(shell, "-l")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",
