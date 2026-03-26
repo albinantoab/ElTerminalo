@@ -1,0 +1,22 @@
+FROM ./qwen-cli-q4.gguf
+
+# 1. Define the exact ChatML format Qwen was trained on
+TEMPLATE """<|im_start|>system
+{{ .System }}<|im_end|>
+<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+"""
+
+# 2. Tell Ollama exactly when to STOP generating text
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "user"
+PARAMETER stop "assistant"
+
+# 3. Make the AI highly deterministic (no creative hallucinating)
+PARAMETER temperature 0.1
+PARAMETER top_p 0.9
+
+# 4. Your original system prompt
+SYSTEM """You are a shell command generator. OS: macos, Shell: zsh, CWD: ~/. Output ONLY the command."""
