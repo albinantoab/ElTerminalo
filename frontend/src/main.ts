@@ -6,6 +6,7 @@ import { CommandWizard } from './wizard/CommandWizard';
 import { ThemeWizard } from './wizard/ThemeWizard';
 import { StateManager } from './state/StateManager';
 import { StatusModal } from './status/StatusModal';
+import { AskAI } from './ai/AskAI';
 import { escHtml, generateId, waitForLayout, utf8ToBase64, bytesToBase64 } from './utils';
 import {
   MAX_TABS, DOUBLE_CLICK_DELAY_MS, MIN_SPLIT_RATIO, MAX_SPLIT_RATIO,
@@ -30,6 +31,9 @@ class ElTerminalo {
   private themeWizard!: ThemeWizard;
   private stateManager!: StateManager;
   private statusModal!: StatusModal;
+  private askAI!: AskAI;
+  private aiGenerating = false;
+  private modelUpdateAvailable = false;
 
   // Current tab helpers
   private get tab(): Tab { return this.tabs[this.activeTabIndex]; }
@@ -97,6 +101,14 @@ class ElTerminalo {
       },
     });
 
+    const aiOverlay = document.getElementById('ai-overlay')!;
+    this.askAI = new AskAI(aiOverlay, {
+      getActiveSessionId: () => this.panes[this.activeIndex]?.pane?.sessionId || '',
+      getActivePaneCWD: () => this.getActivePaneCWD(),
+      focusActivePane: () => this.focusActivePane(),
+      setAILoading: (loading) => this.setAILoading(loading),
+    });
+
     this.stateManager = new StateManager({
       getTabs: () => this.tabs,
       getActiveTabIndex: () => this.activeTabIndex,
@@ -109,6 +121,9 @@ class ElTerminalo {
 
     await this.refreshCustomCommands();
 
+    // Download AI model during splash if needed
+    await this.ensureModelReady();
+
     const restored = await this.restoreState();
     if (!restored) {
       applyThemeToCSS(this.currentTheme);
@@ -117,15 +132,33 @@ class ElTerminalo {
 
     this.switchToTab(this.activeTabIndex);
     window.addEventListener('keydown', (e: KeyboardEvent) => this.handleKeydown(e), true);
+
+    // Re-focus active pane when app regains focus (after lock/unlock, screen switch, etc.)
+    // Without this, shortcuts stop working until the user clicks the terminal.
+    // Also hide the active pane border when the app loses focus.
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) this.focusActivePane();
+    });
+    window.addEventListener('focus', () => {
+      document.body.classList.remove('app-blurred');
+      this.focusActivePane();
+    });
+    window.addEventListener('blur', () => {
+      document.body.classList.add('app-blurred');
+    });
+
     this.renderStatusBar();
     setInterval(() => this.stateManager.save(), STATE_SAVE_INTERVAL_MS);
 
     // Dismiss splash screen
     this.dismissSplash();
 
-    // Check for updates in background (non-blocking), then every 6 hours
+    // AI model loads lazily on first Cmd+K use, unloads after idle.
+
+    // Check for app + model updates in background (non-blocking), then every 6 hours
     this.checkForUpdate();
-    setInterval(() => this.checkForUpdate(), 6 * 60 * 60 * 1000);
+    this.checkModelUpdate();
+    setInterval(() => { this.checkForUpdate(); this.checkModelUpdate(); }, 6 * 60 * 60 * 1000);
 
     // Listen for close confirmation request from the Go backend
     window.runtime.EventsOn('app:confirm-close', () => this.showCloseConfirmation());
@@ -171,6 +204,60 @@ class ElTerminalo {
       }
     } catch (_) {
       // Silently ignore — update check is best-effort
+    }
+  }
+
+  private async ensureModelReady(): Promise<void> {
+    try {
+      const downloaded = await window.go.main.App.IsModelDownloaded();
+      if (downloaded) return;
+
+      const status = document.getElementById('splash-status');
+      const bar = document.getElementById('splash-bar');
+      if (status) status.textContent = 'Downloading AI model... (Esc to skip)';
+      if (bar) {
+        bar.classList.add('downloading');
+        bar.style.width = '0%';
+      }
+
+      // Allow Escape to cancel the download
+      let skipped = false;
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          skipped = true;
+          window.go.main.App.SkipDownload();
+          if (status) status.textContent = 'Skipping download...';
+        }
+      };
+      document.addEventListener('keydown', onKey, true);
+
+      // Listen for download progress events
+      const unsub = window.runtime.EventsOn('model:download-progress', (data: { downloaded: number; total: number }) => {
+        if (data.total > 0 && !skipped) {
+          const pct = Math.round((data.downloaded / data.total) * 100);
+          const mbDown = (data.downloaded / 1024 / 1024).toFixed(1);
+          const mbTotal = (data.total / 1024 / 1024).toFixed(1);
+          if (status) status.textContent = `Downloading AI model... ${mbDown} / ${mbTotal} MB (${pct}%) — Esc to skip`;
+          if (bar) bar.style.width = `${pct}%`;
+        }
+      });
+
+      try {
+        await window.go.main.App.DownloadModel();
+        if (!skipped && status) status.textContent = 'Model ready';
+        if (!skipped && bar) bar.style.width = '100%';
+      } catch {
+        if (skipped) {
+          if (status) status.textContent = 'Download skipped — use Cmd+K to retry later';
+        } else {
+          if (status) status.textContent = 'Download failed — use Cmd+K to retry later';
+        }
+      }
+
+      unsub();
+      document.removeEventListener('keydown', onKey, true);
+    } catch (e) {
+      console.error('Model check failed:', e);
     }
   }
 
@@ -593,9 +680,13 @@ class ElTerminalo {
       ? `<a class="status-update" id="status-update-link">Update v${escHtml(this.updateInfo.latestVersion)} available</a><span class="status-sep">·</span>`
       : '';
 
+    const aiBadge = `<span class="status-key">Cmd + K</span><span class="status-label">ai</span>`;
+
     this.statusbar.innerHTML = `
       <div class="status-left">${updateBadge}</div>
       <div class="status-right">
+        ${aiBadge}
+        <span class="status-sep">·</span>
         <span class="status-key">Cmd + P</span><span class="status-label">commands</span>
         <span class="status-sep">·</span>
         <span class="status-key">Cmd + I</span><span class="status-label">status</span>
@@ -716,6 +807,8 @@ class ElTerminalo {
       { name: 'Close Pane', desc: 'Close the active pane', category: 'Panes', shortcutDisplay: 'Cmd+X', action: () => this.closeActivePane() },
       { name: 'Next Pane', desc: 'Focus the next pane', category: 'Panes', shortcutDisplay: 'Cmd+→', action: () => this.navigateSpatial('right') },
       { name: 'Previous Pane', desc: 'Focus the previous pane', category: 'Panes', shortcutDisplay: 'Cmd+←', action: () => this.navigateSpatial('left') },
+      { name: 'AI Command', desc: 'Generate a shell command from natural language', category: 'General', shortcutDisplay: 'Cmd+K', action: () => { this.closePaletteIfOpen(); this.askAI.show(); } },
+      ...(this.modelUpdateAvailable ? [{ name: 'Update AI Model', desc: 'A newer model version is available', category: 'AI', action: () => { this.closePaletteIfOpen(); this.handleModelDownload(); } }] : []),
       { name: 'Session Status', desc: 'Show running commands across all panes', category: 'General', shortcutDisplay: 'Cmd+I', action: () => { this.closePaletteIfOpen(); this.statusModal.show(); } },
       { name: 'Command Palette', desc: 'Open command palette', category: 'General', shortcutDisplay: 'Cmd+P', action: () => this.palette.show() },
       { name: 'Clear Terminal', desc: 'Clear the active terminal', category: 'General', shortcutDisplay: 'Cmd+L', action: () => this.clearActiveTerminal() },
@@ -802,6 +895,139 @@ class ElTerminalo {
     if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('\x0c'));
   }
 
+  // --- AI Command (Cmd+K) ---
+
+  private setAILoading(loading: boolean): void {
+    this.aiGenerating = loading;
+    this.renderStatusBar();
+    const ap = this.panes[this.activeIndex];
+    if (ap) {
+      ap.element.classList.toggle('ai-loading', loading);
+    }
+  }
+
+  private async handleAskAI(): Promise<void> {
+    if (this.aiGenerating) return;
+    const ap = this.panes[this.activeIndex];
+    if (!ap?.pane.sessionId) return;
+
+    // Read what the user typed on the current line
+    const query = ap.pane.getCurrentInput();
+    if (!query.trim()) return;
+
+    // Check model, trigger download dialog if needed
+    const ready = await window.go.main.App.IsModelReady();
+    if (!ready) {
+      await this.handleModelDownload();
+      // Recheck after dialog closes
+      if (!(await window.go.main.App.IsModelReady())) return;
+    }
+
+    // Show generating state — rotating border + status bar
+    this.setAILoading(true);
+
+    // Clear current line (Ctrl+U clears everything before cursor in most shells)
+    window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('\x15'));
+
+    try {
+      const cwd = await ap.pane.getCWD();
+      const command = await window.go.main.App.AskAI(query, cwd);
+
+      // Write the generated command WITHOUT executing (no newline)
+      if (command) {
+        window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(command));
+      }
+    } catch (err) {
+      // Restore the original query on failure
+      window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(query));
+      console.error('AI generation failed:', err);
+    }
+
+    this.setAILoading(false);
+  }
+
+  private async checkModelUpdate(): Promise<void> {
+    try {
+      this.modelUpdateAvailable = await window.go.main.App.CheckModelUpdate();
+    } catch { /* best-effort */ }
+  }
+
+  private async handleModelDownload(): Promise<void> {
+    // Show dialog (same style as the app update dialog)
+    const overlay = document.createElement('div');
+    overlay.className = 'update-overlay';
+    overlay.innerHTML = `<div class="update-dialog">
+      <div class="update-dialog-title">${this.modelUpdateAvailable ? 'Update AI Model' : 'Download AI Model'}</div>
+      <div class="update-dialog-body">
+        <div id="model-dl-status">Connecting...</div>
+        <div class="model-dl-bar-track"><div class="model-dl-bar-fill" id="model-dl-bar"></div></div>
+      </div>
+      <div class="update-dialog-actions">
+        <button class="theme-btn theme-btn-cancel" id="model-dl-cancel">Cancel</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+
+    const statusEl = document.getElementById('model-dl-status')!;
+    const barEl = document.getElementById('model-dl-bar')!;
+
+    // Cancel button + Escape
+    let cancelled = false;
+    const cancel = () => {
+      cancelled = true;
+      window.go.main.App.SkipDownload();
+    };
+    document.getElementById('model-dl-cancel')?.addEventListener('click', cancel);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') cancel();
+      e.stopPropagation();
+    };
+    document.addEventListener('keydown', onKey, true);
+
+    const unsub = window.runtime.EventsOn('model:download-progress', (data: { downloaded: number; total: number }) => {
+      if (data.total > 0) {
+        const pct = Math.round((data.downloaded / data.total) * 100);
+        const mbDown = (data.downloaded / 1024 / 1024).toFixed(1);
+        const mbTotal = (data.total / 1024 / 1024).toFixed(1);
+        statusEl.textContent = `Downloading... ${mbDown} / ${mbTotal} MB (${pct}%)`;
+        barEl.style.width = `${pct}%`;
+      }
+    });
+
+    try {
+      await window.go.main.App.DownloadModel();
+      unsub();
+
+      if (!cancelled) {
+        statusEl.textContent = 'Loading model...';
+        barEl.style.width = '100%';
+        await window.go.main.App.InitLLM();
+        this.modelUpdateAvailable = false;
+        statusEl.textContent = 'AI model ready!';
+        setTimeout(() => {
+          overlay.remove();
+          this.focusActivePane();
+        }, 800);
+      } else {
+        overlay.remove();
+        this.focusActivePane();
+      }
+    } catch {
+      unsub();
+      if (cancelled) {
+        overlay.remove();
+      } else {
+        statusEl.textContent = 'Download failed. Check your network.';
+        barEl.style.width = '0%';
+        const cancelBtn = document.getElementById('model-dl-cancel');
+        if (cancelBtn) cancelBtn.textContent = 'Close';
+      }
+      this.focusActivePane();
+    }
+
+    document.removeEventListener('keydown', onKey, true);
+  }
+
   // --- Keyboard ---
 
   private handleKeydown(e: KeyboardEvent): void {
@@ -824,6 +1050,13 @@ class ElTerminalo {
     if (this.wizard.isOpen()) {
       e.stopPropagation();
       this.wizard.handleKeydown(e);
+      return;
+    }
+
+    // AI modal takes priority
+    if (this.askAI.isOpen()) {
+      e.stopPropagation();
+      this.askAI.handleKeydown(e);
       return;
     }
 
@@ -877,6 +1110,7 @@ class ElTerminalo {
       }
 
       switch (e.key.toLowerCase()) {
+        case 'k': e.preventDefault(); this.handleAskAI(); return;
         case 'i': e.preventDefault(); this.statusModal.show(); return;
         case 'p': e.preventDefault(); this.palette.show(); return;
         case 't': e.preventDefault(); this.createTab(); return;

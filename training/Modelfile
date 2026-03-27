@@ -1,4 +1,4 @@
-FROM ./qwen-cli-q4.gguf
+FROM ./shell-cmd-qwen-0.5b-q8.gguf
 
 # 1. Define the exact ChatML format Qwen was trained on
 TEMPLATE """<|im_start|>system

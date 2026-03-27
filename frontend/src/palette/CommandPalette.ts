@@ -147,7 +147,7 @@ export class CommandPalette {
         lastCategory = c.category;
         groupHeader = `<div class="palette-group-header">${escHtml(c.category)}</div>`;
       }
-      return `${groupHeader}<div class="palette-item ${i === this.cursor ? 'selected' : ''}" data-index="${i}"><div><span class="palette-item-name">${escHtml(c.name)}</span><span class="palette-item-desc">${escHtml(c.desc)}</span></div>${shortcutBadge}</div>`;
+      return `${groupHeader}<div class="palette-item ${i === this.cursor ? 'selected' : ''}" data-index="${i}"><div class="palette-item-text"><span class="palette-item-name">${escHtml(c.name)}</span><span class="palette-item-desc">${escHtml(c.desc)}</span></div>${shortcutBadge}</div>`;
     }).join('');
 
     this.overlay.innerHTML = `<div class="palette-box"><input class="palette-input" type="text" placeholder="Type a command..." value="${this.query}" /><div class="palette-list">${items || '<div class="palette-item"><span class="palette-item-desc">No matching commands</span></div>'}</div><div class="palette-hint"><kbd>Enter</kbd> execute · <kbd>Cmd + Enter</kbd> fill · <kbd>Cmd + E</kbd> edit · <kbd>Cmd + D</kbd> delete · <kbd>Esc</kbd> close</div></div>`;

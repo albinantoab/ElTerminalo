@@ -32,6 +32,10 @@ Thumbs.db
 /tmp/
 frontend/package.json.md5
 
+# Local dependencies (built by `make setup-llm`)
+deps/
+
 # Claude
 .claude/
 .elterminalo/
+training/Qwen-0.5B-Coder-El-Terminalo-q8.gguf

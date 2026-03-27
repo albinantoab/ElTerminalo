@@ -152,13 +152,19 @@ export class TerminalPane {
     if (this.resizeTimer) {
       clearTimeout(this.resizeTimer);
     }
-    this.resizeTimer = setTimeout(() => {
+    this.resizeTimer = setTimeout(async () => {
       window.go.main.App.ResizeSession(this.sessionId, cols, rows);
-      // Clear stale prompt artifacts after resize — only in normal buffer mode.
-      // TUI apps (vim, htop, etc.) use the alternate screen buffer
-      // and handle SIGWINCH-based redraws themselves.
+      // Clear stale prompt artifacts after resize — only when the shell is idle.
+      // If a process is running (yarn dev, etc.), SIGWINCH from the PTY resize
+      // is enough. Sending \x0c to a running process prints ^L.
       if (this.terminal.buffer.active.type === 'normal') {
-        window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x0c'));
+        try {
+          const statuses = await window.go.main.App.GetAllSessionStatuses();
+          const status = statuses[this.sessionId];
+          if (status?.isIdle) {
+            window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x0c'));
+          }
+        } catch { /* skip clear on error */ }
       }
       this.resizeTimer = null;
     }, 150);

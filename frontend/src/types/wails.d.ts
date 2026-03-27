@@ -23,6 +23,13 @@ export interface WailsApp {
   GetVersion(): Promise<string>;
   CheckForUpdate(): Promise<UpdateInfo>;
   ApplyUpdate(): Promise<void>;
+  AskAI(prompt: string, cwd: string): Promise<string>;
+  IsModelReady(): Promise<boolean>;
+  IsModelDownloaded(): Promise<boolean>;
+  DownloadModel(): Promise<void>;
+  SkipDownload(): Promise<void>;
+  CheckModelUpdate(): Promise<boolean>;
+  InitLLM(): Promise<void>;
 }
 
 export interface UpdateInfo {

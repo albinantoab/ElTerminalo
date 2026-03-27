@@ -3,11 +3,14 @@ module github.com/albinanto/elterminalo
 go 1.25.0
 
 require (
+	github.com/AshkanYarmoradi/go-llama.cpp v0.0.0-20260318205202-4189a5b8fd8e
 	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0
 	github.com/wailsapp/wails/v2 v2.11.0
 	golang.org/x/sys v0.42.0
 )
+
+replace github.com/AshkanYarmoradi/go-llama.cpp => ./deps/go-llama.cpp
 
 require (
 	github.com/bep/debounce v1.2.1 // indirect
@@ -32,7 +35,7 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
-	golang.org/x/crypto v0.33.0 // indirect
-	golang.org/x/net v0.35.0 // indirect
-	golang.org/x/text v0.22.0 // indirect
+	golang.org/x/crypto v0.44.0 // indirect
+	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
 )

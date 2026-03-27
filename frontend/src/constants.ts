@@ -9,6 +9,7 @@ export const SPATIAL_NAV_THRESHOLD = 10;
 export const STATE_VERSION = 2;
 
 export const BUILT_IN_SHORTCUTS: Record<string, string> = {
+  'cmd+k': 'AI Command',
   'cmd+i': 'Session Status',
   'cmd+p': 'Command Palette',
   'cmd+b': 'Split Vertical',

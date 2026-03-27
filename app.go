@@ -7,9 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/albinanto/elterminalo/internal/commands"
 	"github.com/albinanto/elterminalo/internal/config"
+	"github.com/albinanto/elterminalo/internal/llm"
 	"github.com/albinanto/elterminalo/internal/ptymanager"
 	"github.com/albinanto/elterminalo/internal/theme"
 	"github.com/albinanto/elterminalo/internal/updater"
@@ -20,6 +23,8 @@ import (
 var Version = "dev"
 
 // App is the main Wails-bound application struct.
+const llmIdleTimeout = 5 * time.Minute
+
 type App struct {
 	ctx            context.Context
 	ptyMgr         *ptymanager.Manager
@@ -28,6 +33,10 @@ type App struct {
 	cmds           *commands.Store
 	dropDir        string
 	closeConfirmed bool
+	llmEngine      *llm.Engine
+	llmMu          sync.Mutex
+	llmIdleTimer   *time.Timer
+	downloadCancel context.CancelFunc
 }
 
 // NewApp creates a new App instance.
@@ -51,6 +60,9 @@ func (a *App) startup(ctx context.Context) {
 
 	// Clean up any stale backup from a prior update
 	updater.CleanupStaleBackup()
+
+	// Clean up partial downloads and old model versions
+	llm.CleanStaleFiles(a.cfg.Dir())
 
 	// Restore saved window geometry
 	if g := a.cfg.LoadWindowGeometry(); g != nil {
@@ -88,6 +100,12 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 
 	a.ptyMgr.CloseAll()
+
+	// Stop idle timer and free LLM model
+	if a.llmIdleTimer != nil {
+		a.llmIdleTimer.Stop()
+	}
+	a.unloadEngine()
 }
 
 // CreateSession creates a new PTY session and returns its ID.
@@ -240,6 +258,114 @@ func (a *App) CheckForUpdate() updater.UpdateInfo {
 // ApplyUpdate downloads and installs the latest release, then relaunches.
 func (a *App) ApplyUpdate() error {
 	return updater.ApplyUpdate()
+}
+
+// IsModelReady returns true if the model is loaded in memory OR exists on disk.
+func (a *App) IsModelReady() bool {
+	a.llmMu.Lock()
+	loaded := a.llmEngine != nil
+	a.llmMu.Unlock()
+	return loaded || llm.ModelExists(a.cfg.Dir())
+}
+
+// IsModelDownloaded checks if the model file exists on disk (for download/update UI).
+func (a *App) IsModelDownloaded() bool {
+	return llm.ModelExists(a.cfg.Dir())
+}
+
+// DownloadModel downloads the AI model from HuggingFace.
+// Emits "model:download-progress" events with {downloaded, total} during download.
+// The download can be cancelled via SkipDownload().
+// Also used to update the model when a new version is available.
+func (a *App) DownloadModel() error {
+	dlCtx, cancel := context.WithCancel(a.ctx)
+	a.downloadCancel = cancel
+	defer func() { a.downloadCancel = nil }()
+
+	return llm.DownloadModel(dlCtx, a.cfg.Dir(), func(downloaded, total int64) {
+		wailsRuntime.EventsEmit(a.ctx, "model:download-progress", map[string]int64{
+			"downloaded": downloaded,
+			"total":      total,
+		})
+	})
+}
+
+// SkipDownload cancels an in-progress model download.
+func (a *App) SkipDownload() {
+	if a.downloadCancel != nil {
+		a.downloadCancel()
+	}
+}
+
+// CheckModelUpdate checks HuggingFace for a newer model version (ETag comparison).
+func (a *App) CheckModelUpdate() bool {
+	return llm.CheckModelUpdate(a.cfg.Dir())
+}
+
+// InitLLM loads the AI model into memory for inference.
+func (a *App) InitLLM() error {
+	a.llmMu.Lock()
+	defer a.llmMu.Unlock()
+	return a.loadEngineLocked()
+}
+
+// loadEngineLocked loads the model. Caller must hold llmMu.
+func (a *App) loadEngineLocked() error {
+	if a.llmEngine != nil {
+		return nil // already loaded
+	}
+	if !llm.ModelExists(a.cfg.Dir()) {
+		return fmt.Errorf("model not downloaded")
+	}
+	engine, err := llm.NewEngine(llm.ModelPath(a.cfg.Dir()), a.shell)
+	if err != nil {
+		return err
+	}
+	a.llmEngine = engine
+	return nil
+}
+
+// unloadEngine frees the model from memory.
+func (a *App) unloadEngine() {
+	a.llmMu.Lock()
+	defer a.llmMu.Unlock()
+	if a.llmEngine != nil {
+		a.llmEngine.Close()
+		a.llmEngine = nil
+	}
+}
+
+// resetIdleTimer resets (or starts) the idle unload timer.
+func (a *App) resetIdleTimer() {
+	if a.llmIdleTimer != nil {
+		a.llmIdleTimer.Stop()
+	}
+	a.llmIdleTimer = time.AfterFunc(llmIdleTimeout, func() {
+		a.unloadEngine()
+	})
+}
+
+// AskAI generates a shell command from a natural language prompt.
+// Loads the model on first use and unloads after idle.
+func (a *App) AskAI(prompt string, cwd string) (string, error) {
+	if prompt == "" {
+		return "", fmt.Errorf("prompt is required")
+	}
+
+	a.llmMu.Lock()
+	if err := a.loadEngineLocked(); err != nil {
+		a.llmMu.Unlock()
+		return "", err
+	}
+	engine := a.llmEngine
+	a.llmMu.Unlock()
+
+	result, err := engine.Generate(prompt, cwd)
+
+	// Reset idle timer after each use
+	a.resetIdleTimer()
+
+	return result, err
 }
 
 // SaveDroppedFile saves base64-encoded file data to a temp directory
