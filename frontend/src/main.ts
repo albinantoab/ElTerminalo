@@ -691,9 +691,9 @@ class ElTerminalo {
         <span class="status-sep">·</span>
         <span class="status-key">Cmd + I</span><span class="status-label">status</span>
         <span class="status-sep">·</span>
-        <span class="status-key">Cmd + B</span><span class="status-label">vsplit</span>
+        <span class="status-key">Cmd + |</span><span class="status-label">vsplit</span>
         <span class="status-sep">·</span>
-        <span class="status-key">Cmd + G</span><span class="status-label">hsplit</span>
+        <span class="status-key">Cmd + -</span><span class="status-label">hsplit</span>
         <span class="status-sep">·</span>
         <span class="status-key">Cmd + X</span><span class="status-label">close pane</span>
         <span class="status-sep">·</span>
@@ -802,8 +802,8 @@ class ElTerminalo {
       { name: 'New Tab', desc: 'Open a new terminal tab', category: 'Tabs', shortcutDisplay: 'Cmd+T', action: () => this.createTab() },
       { name: 'Close Tab', desc: 'Close current tab', category: 'Tabs', shortcutDisplay: 'Cmd+W', action: () => this.closeTab(this.activeTabIndex) },
       { name: 'Rename Tab', desc: 'Rename current tab', category: 'Tabs', action: () => { this.palette.hide(); this.renamingTabIndex = this.activeTabIndex; this.renderTabBar(); } },
-      { name: 'Split Vertical', desc: 'Split pane side by side', category: 'Panes', shortcutDisplay: 'Cmd+B', action: () => this.splitPane('vertical') },
-      { name: 'Split Horizontal', desc: 'Split pane top/bottom', category: 'Panes', shortcutDisplay: 'Cmd+G', action: () => this.splitPane('horizontal') },
+      { name: 'Split Vertical', desc: 'Split pane side by side', category: 'Panes', shortcutDisplay: 'Cmd+|', action: () => this.splitPane('vertical') },
+      { name: 'Split Horizontal', desc: 'Split pane top/bottom', category: 'Panes', shortcutDisplay: 'Cmd+-', action: () => this.splitPane('horizontal') },
       { name: 'Close Pane', desc: 'Close the active pane', category: 'Panes', shortcutDisplay: 'Cmd+X', action: () => this.closeActivePane() },
       { name: 'Next Pane', desc: 'Focus the next pane', category: 'Panes', shortcutDisplay: 'Cmd+→', action: () => this.navigateSpatial('right') },
       { name: 'Previous Pane', desc: 'Focus the previous pane', category: 'Panes', shortcutDisplay: 'Cmd+←', action: () => this.navigateSpatial('left') },
@@ -1108,6 +1108,11 @@ class ElTerminalo {
         this.wizard.show(input);
         return;
       }
+      if (e.shiftKey && e.key === '\\') {
+        e.preventDefault();
+        this.splitPane('vertical');
+        return;
+      }
 
       switch (e.key.toLowerCase()) {
         case 'k': e.preventDefault(); this.handleAskAI(); return;
@@ -1115,8 +1120,8 @@ class ElTerminalo {
         case 'p': e.preventDefault(); this.palette.show(); return;
         case 't': e.preventDefault(); this.createTab(); return;
         case 'w': e.preventDefault(); this.closeTab(this.activeTabIndex); return;
-        case 'b': e.preventDefault(); this.splitPane('vertical'); return;
-        case 'g': e.preventDefault(); this.splitPane('horizontal'); return;
+        case '|': e.preventDefault(); this.splitPane('vertical'); return;
+        case '-': e.preventDefault(); this.splitPane('horizontal'); return;
         case 'x': e.preventDefault(); this.closeActivePane(); return;
         case 'l': e.preventDefault(); this.clearActiveTerminal(); return;
         case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9':
