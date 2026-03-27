@@ -1,4 +1,5 @@
 import { escHtml, utf8ToBase64 } from '../utils';
+import { CMD } from '../constants';
 
 export interface AskAICallbacks {
   getActiveSessionId(): string;
@@ -100,7 +101,7 @@ export class AskAI {
       <div class="ai-box">
         <div class="ai-header">
           <span class="ai-title">AI Command</span>
-          <kbd class="ai-badge">Cmd+K</kbd>
+          <kbd class="ai-badge">${CMD.AI_COMMAND.shortcut}</kbd>
         </div>
         <input
           class="ai-input"
@@ -111,9 +112,9 @@ export class AskAI {
         ${this.loading ? '<div class="ai-loader"><div class="ai-loader-bar"></div></div>' : ''}
         ${errorHtml}
         <div class="ai-hint">
-          <kbd>Enter</kbd> generate &middot; <kbd>Esc</kbd> close
+          <kbd>ENTER</kbd> generate &middot; <kbd>ESC</kbd> close
         </div>
-        <div class="ai-tip">Tip: type directly in terminal and press <kbd>Cmd+K</kbd> to convert inline</div>
+        <div class="ai-tip">Tip: type directly in terminal and press <kbd>${CMD.AI_COMMAND.shortcut}</kbd> to convert inline</div>
       </div>
     `;
 

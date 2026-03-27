@@ -4,6 +4,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import '../types/wails.d.ts';
 import { utf8ToBase64 } from '../utils';
+import { CMD } from '../constants';
 
 export interface XtermTheme {
   background: string;
@@ -198,7 +199,7 @@ export class TerminalPane {
 
       const items: MenuItem[] = [
         {
-          type: 'action', label: 'Copy', shortcut: 'Cmd+C',
+          type: 'action', label: CMD.COPY.name, shortcut: CMD.COPY.shortcut,
           enabled: hasSelection,
           action: () => {
             const text = this.terminal.getSelection();
@@ -207,7 +208,7 @@ export class TerminalPane {
           },
         },
         {
-          type: 'action', label: 'Paste', shortcut: 'Cmd+V',
+          type: 'action', label: CMD.PASTE.name, shortcut: CMD.PASTE.shortcut,
           enabled: true,
           action: async () => {
             const text = await navigator.clipboard.readText();
@@ -216,7 +217,7 @@ export class TerminalPane {
         },
         { type: 'separator' },
         {
-          type: 'action', label: 'Select All', shortcut: 'Cmd+A',
+          type: 'action', label: CMD.SELECT_ALL.name, shortcut: CMD.SELECT_ALL.shortcut,
           enabled: true,
           action: () => this.terminal.selectAll(),
         },
@@ -227,17 +228,17 @@ export class TerminalPane {
         },
         { type: 'separator' },
         {
-          type: 'action', label: 'Split Vertical', shortcut: 'Cmd+B',
+          type: 'action', label: CMD.SPLIT_VERTICAL.name, shortcut: CMD.SPLIT_VERTICAL.shortcut,
           enabled: !!this.ctxActions,
           action: () => this.ctxActions?.splitVertical(),
         },
         {
-          type: 'action', label: 'Split Horizontal', shortcut: 'Cmd+G',
+          type: 'action', label: CMD.SPLIT_HORIZONTAL.name, shortcut: CMD.SPLIT_HORIZONTAL.shortcut,
           enabled: !!this.ctxActions,
           action: () => this.ctxActions?.splitHorizontal(),
         },
         {
-          type: 'action', label: 'Close Pane', shortcut: 'Cmd+X',
+          type: 'action', label: CMD.CLOSE_PANE.name, shortcut: CMD.CLOSE_PANE.shortcut,
           enabled: !!this.ctxActions,
           action: () => this.ctxActions?.closePane(),
         },

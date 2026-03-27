@@ -1,5 +1,6 @@
 import { PaletteCommand, CustomCommand } from '../types';
 import { utf8ToBase64, escHtml } from '../utils';
+import { CMD } from '../constants';
 
 export interface PaletteCallbacks {
   getBuiltInCommands(): PaletteCommand[];
@@ -105,7 +106,7 @@ export class CommandPalette {
         name: c.name,
         desc: c.description || cmdPreview,
         category: c.scope === 'local' ? 'Project' : 'Global',
-        shortcutDisplay: c.shortcut || '',
+        shortcutDisplay: c.shortcut ? c.shortcut.toUpperCase() : '',
         isCustom: true,
         scope: c.scope,
         command: c.command,
@@ -150,7 +151,7 @@ export class CommandPalette {
       return `${groupHeader}<div class="palette-item ${i === this.cursor ? 'selected' : ''}" data-index="${i}"><div class="palette-item-text"><span class="palette-item-name">${escHtml(c.name)}</span><span class="palette-item-desc">${escHtml(c.desc)}</span></div>${shortcutBadge}</div>`;
     }).join('');
 
-    this.overlay.innerHTML = `<div class="palette-box"><input class="palette-input" type="text" placeholder="Type a command..." value="${this.query}" /><div class="palette-list">${items || '<div class="palette-item"><span class="palette-item-desc">No matching commands</span></div>'}</div><div class="palette-hint"><kbd>Enter</kbd> execute · <kbd>Cmd + Enter</kbd> fill · <kbd>Cmd + E</kbd> edit · <kbd>Cmd + D</kbd> delete · <kbd>Esc</kbd> close</div></div>`;
+    this.overlay.innerHTML = `<div class="palette-box"><input class="palette-input" type="text" placeholder="Type a command..." value="${this.query}" /><div class="palette-list">${items || '<div class="palette-item"><span class="palette-item-desc">No matching commands</span></div>'}</div><div class="palette-hint"><kbd>ENTER</kbd> execute · <kbd>${CMD.FILL.shortcut}</kbd> fill · <kbd>${CMD.EDIT_COMMAND.shortcut}</kbd> edit · <kbd>${CMD.DELETE_COMMAND.shortcut}</kbd> delete · <kbd>ESC</kbd> close</div></div>`;
 
     const input = this.overlay.querySelector('.palette-input') as HTMLInputElement;
     input.addEventListener('input', (e) => {

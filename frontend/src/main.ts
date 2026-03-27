@@ -10,7 +10,7 @@ import { AskAI } from './ai/AskAI';
 import { escHtml, generateId, waitForLayout, utf8ToBase64, bytesToBase64 } from './utils';
 import {
   MAX_TABS, DOUBLE_CLICK_DELAY_MS, MIN_SPLIT_RATIO, MAX_SPLIT_RATIO,
-  DEFAULT_SPLIT_RATIO, SPATIAL_NAV_THRESHOLD, STATE_SAVE_INTERVAL_MS,
+  DEFAULT_SPLIT_RATIO, SPATIAL_NAV_THRESHOLD, STATE_SAVE_INTERVAL_MS, CMD,
 } from './constants';
 import './types/wails.d.ts';
 
@@ -362,7 +362,7 @@ class ElTerminalo {
 
     this.tabBar.innerHTML = `
       <div class="tab-list">${tabs}</div>
-      <div class="tab-new" title="New Tab (Cmd+T)">+</div>
+      <div class="tab-new" title="${CMD.NEW_TAB.name} (${CMD.NEW_TAB.shortcut})">+</div>
     `;
 
     // Wire tab clicks — delay single click to detect double click
@@ -680,24 +680,22 @@ class ElTerminalo {
       ? `<a class="status-update" id="status-update-link">Update v${escHtml(this.updateInfo.latestVersion)} available</a><span class="status-sep">·</span>`
       : '';
 
-    const aiBadge = `<span class="status-key">Cmd + K</span><span class="status-label">ai</span>`;
-
     this.statusbar.innerHTML = `
       <div class="status-left">${updateBadge}</div>
       <div class="status-right">
-        ${aiBadge}
+        <span class="status-key">${CMD.AI_COMMAND.shortcut}</span><span class="status-label">ai</span>
         <span class="status-sep">·</span>
-        <span class="status-key">Cmd + P</span><span class="status-label">commands</span>
+        <span class="status-key">${CMD.COMMAND_PALETTE.shortcut}</span><span class="status-label">commands</span>
         <span class="status-sep">·</span>
-        <span class="status-key">Cmd + I</span><span class="status-label">status</span>
+        <span class="status-key">${CMD.SESSION_STATUS.shortcut}</span><span class="status-label">status</span>
         <span class="status-sep">·</span>
-        <span class="status-key">Cmd + |</span><span class="status-label">vsplit</span>
+        <span class="status-key">${CMD.SPLIT_VERTICAL.shortcut}</span><span class="status-label">vsplit</span>
         <span class="status-sep">·</span>
-        <span class="status-key">Cmd + -</span><span class="status-label">hsplit</span>
+        <span class="status-key">${CMD.SPLIT_HORIZONTAL.shortcut}</span><span class="status-label">hsplit</span>
         <span class="status-sep">·</span>
-        <span class="status-key">Cmd + X</span><span class="status-label">close pane</span>
+        <span class="status-key">${CMD.CLOSE_PANE.shortcut}</span><span class="status-label">close pane</span>
         <span class="status-sep">·</span>
-        <span class="status-key">Cmd + L</span><span class="status-label">clear</span>
+        <span class="status-key">${CMD.CLEAR_TERMINAL.shortcut}</span><span class="status-label">clear</span>
       </div>
     `;
 
@@ -799,20 +797,20 @@ class ElTerminalo {
 
   private getBuiltInCommands(): PaletteCommand[] {
     return [
-      { name: 'New Tab', desc: 'Open a new terminal tab', category: 'Tabs', shortcutDisplay: 'Cmd+T', action: () => this.createTab() },
-      { name: 'Close Tab', desc: 'Close current tab', category: 'Tabs', shortcutDisplay: 'Cmd+W', action: () => this.closeTab(this.activeTabIndex) },
-      { name: 'Rename Tab', desc: 'Rename current tab', category: 'Tabs', action: () => { this.palette.hide(); this.renamingTabIndex = this.activeTabIndex; this.renderTabBar(); } },
-      { name: 'Split Vertical', desc: 'Split pane side by side', category: 'Panes', shortcutDisplay: 'Cmd+|', action: () => this.splitPane('vertical') },
-      { name: 'Split Horizontal', desc: 'Split pane top/bottom', category: 'Panes', shortcutDisplay: 'Cmd+-', action: () => this.splitPane('horizontal') },
-      { name: 'Close Pane', desc: 'Close the active pane', category: 'Panes', shortcutDisplay: 'Cmd+X', action: () => this.closeActivePane() },
-      { name: 'Next Pane', desc: 'Focus the next pane', category: 'Panes', shortcutDisplay: 'Cmd+→', action: () => this.navigateSpatial('right') },
-      { name: 'Previous Pane', desc: 'Focus the previous pane', category: 'Panes', shortcutDisplay: 'Cmd+←', action: () => this.navigateSpatial('left') },
-      { name: 'AI Command', desc: 'Generate a shell command from natural language', category: 'General', shortcutDisplay: 'Cmd+K', action: () => { this.closePaletteIfOpen(); this.askAI.show(); } },
-      ...(this.modelUpdateAvailable ? [{ name: 'Update AI Model', desc: 'A newer model version is available', category: 'AI', action: () => { this.closePaletteIfOpen(); this.handleModelDownload(); } }] : []),
-      { name: 'Session Status', desc: 'Show running commands across all panes', category: 'General', shortcutDisplay: 'Cmd+I', action: () => { this.closePaletteIfOpen(); this.statusModal.show(); } },
-      { name: 'Command Palette', desc: 'Open command palette', category: 'General', shortcutDisplay: 'Cmd+P', action: () => this.palette.show() },
-      { name: 'Clear Terminal', desc: 'Clear the active terminal', category: 'General', shortcutDisplay: 'Cmd+L', action: () => this.clearActiveTerminal() },
-      { name: 'Create Command', desc: 'Create a custom command', category: 'Commands', shortcutDisplay: 'Cmd+Shift+C', action: () => { this.palette.hide(); const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || ''; this.wizard.show(input); } },
+      { name: CMD.NEW_TAB.name, desc: CMD.NEW_TAB.desc, category: CMD.NEW_TAB.category, shortcutDisplay: CMD.NEW_TAB.shortcut, action: () => this.createTab() },
+      { name: CMD.CLOSE_TAB.name, desc: CMD.CLOSE_TAB.desc, category: CMD.CLOSE_TAB.category, shortcutDisplay: CMD.CLOSE_TAB.shortcut, action: () => this.closeTab(this.activeTabIndex) },
+      { name: CMD.RENAME_TAB.name, desc: CMD.RENAME_TAB.desc, category: CMD.RENAME_TAB.category, action: () => { this.palette.hide(); this.renamingTabIndex = this.activeTabIndex; this.renderTabBar(); } },
+      { name: CMD.SPLIT_VERTICAL.name, desc: CMD.SPLIT_VERTICAL.desc, category: CMD.SPLIT_VERTICAL.category, shortcutDisplay: CMD.SPLIT_VERTICAL.shortcut, action: () => this.splitPane('vertical') },
+      { name: CMD.SPLIT_HORIZONTAL.name, desc: CMD.SPLIT_HORIZONTAL.desc, category: CMD.SPLIT_HORIZONTAL.category, shortcutDisplay: CMD.SPLIT_HORIZONTAL.shortcut, action: () => this.splitPane('horizontal') },
+      { name: CMD.CLOSE_PANE.name, desc: CMD.CLOSE_PANE.desc, category: CMD.CLOSE_PANE.category, shortcutDisplay: CMD.CLOSE_PANE.shortcut, action: () => this.closeActivePane() },
+      { name: CMD.NEXT_PANE.name, desc: CMD.NEXT_PANE.desc, category: CMD.NEXT_PANE.category, shortcutDisplay: CMD.NEXT_PANE.shortcut, action: () => this.navigateSpatial('right') },
+      { name: CMD.PREV_PANE.name, desc: CMD.PREV_PANE.desc, category: CMD.PREV_PANE.category, shortcutDisplay: CMD.PREV_PANE.shortcut, action: () => this.navigateSpatial('left') },
+      { name: CMD.AI_COMMAND.name, desc: CMD.AI_COMMAND.desc, category: CMD.AI_COMMAND.category, shortcutDisplay: CMD.AI_COMMAND.shortcut, action: () => { this.closePaletteIfOpen(); this.askAI.show(); } },
+      ...(this.modelUpdateAvailable ? [{ name: CMD.UPDATE_MODEL.name, desc: CMD.UPDATE_MODEL.desc, category: CMD.UPDATE_MODEL.category, action: () => { this.closePaletteIfOpen(); this.handleModelDownload(); } }] : []),
+      { name: CMD.SESSION_STATUS.name, desc: CMD.SESSION_STATUS.desc, category: CMD.SESSION_STATUS.category, shortcutDisplay: CMD.SESSION_STATUS.shortcut, action: () => { this.closePaletteIfOpen(); this.statusModal.show(); } },
+      { name: CMD.COMMAND_PALETTE.name, desc: CMD.COMMAND_PALETTE.desc, category: CMD.COMMAND_PALETTE.category, shortcutDisplay: CMD.COMMAND_PALETTE.shortcut, action: () => this.palette.show() },
+      { name: CMD.CLEAR_TERMINAL.name, desc: CMD.CLEAR_TERMINAL.desc, category: CMD.CLEAR_TERMINAL.category, shortcutDisplay: CMD.CLEAR_TERMINAL.shortcut, action: () => this.clearActiveTerminal() },
+      { name: CMD.CREATE_COMMAND.name, desc: CMD.CREATE_COMMAND.desc, category: CMD.CREATE_COMMAND.category, shortcutDisplay: CMD.CREATE_COMMAND.shortcut, action: () => { this.palette.hide(); const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || ''; this.wizard.show(input); } },
       ...this.themes.map(t => ({
         name: `Theme: ${t.name}`, desc: `Switch to ${t.name} theme`, category: 'Appearance',
         isTheme: true,
