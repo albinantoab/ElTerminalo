@@ -42,8 +42,14 @@ __elterminalo_debug_trap() {
     return
   fi
 
+  # Capture full command from history and encode for history tracking
+  local full_cmd
+  full_cmd=$(HISTTIMEFORMAT='' builtin history 1 | sed 's/^[ ]*[0-9]*[ ]*//')
+  local cmd_b64
+  cmd_b64=$(builtin printf '%s' "$full_cmd" | base64 | tr -d '\n')
+
   __elterminalo_osc133 "B"
-  __elterminalo_osc133 "C"
+  __elterminalo_osc133 "C;cmd=${cmd_b64}"
   __elterminalo_cmd_executed=1
 
   # Remove the trap after first command (re-set by prompt_command on next prompt)

@@ -7,6 +7,7 @@ import { ThemeWizard } from './wizard/ThemeWizard';
 import { StateManager } from './state/StateManager';
 import { StatusModal } from './status/StatusModal';
 import { AskAI } from './ai/AskAI';
+import { HistoryModal } from './history/HistoryModal';
 import { escHtml, generateId, waitForLayout, utf8ToBase64, bytesToBase64 } from './utils';
 import {
   MAX_TABS, DOUBLE_CLICK_DELAY_MS, MIN_SPLIT_RATIO, MAX_SPLIT_RATIO,
@@ -32,6 +33,7 @@ class ElTerminalo {
   private stateManager!: StateManager;
   private statusModal!: StatusModal;
   private askAI!: AskAI;
+  private historyModal!: HistoryModal;
   private aiGenerating = false;
   private modelUpdateAvailable = false;
 
@@ -107,6 +109,13 @@ class ElTerminalo {
       getActivePaneCWD: () => this.getActivePaneCWD(),
       focusActivePane: () => this.focusActivePane(),
       setAILoading: (loading) => this.setAILoading(loading),
+    });
+
+    const historyOverlay = document.getElementById('history-overlay')!;
+    this.historyModal = new HistoryModal(historyOverlay, {
+      getActiveSessionId: () => this.panes[this.activeIndex]?.pane?.sessionId || '',
+      getActivePaneCWD: () => this.getActivePaneCWD(),
+      focusActivePane: () => this.focusActivePane(),
     });
 
     this.stateManager = new StateManager({
@@ -511,6 +520,15 @@ class ElTerminalo {
 
     pane.smartRender.onBadgesChanged = () => this.renderStatusBar();
 
+    // Record commands in history database
+    pane.shellIntegration.onCommandFinishedAdd(async (block, exitCode) => {
+      if (!block.commandText || !pane.sessionId) return;
+      try {
+        const cwd = await pane.getCWD();
+        await window.go.main.App.RecordCommand(block.commandText, cwd, exitCode, pane.sessionId);
+      } catch { /* best-effort */ }
+    });
+
     el.addEventListener('mousedown', (e) => {
       if (e.button === 2) return; // don't steal focus on right-click
       const idx = tab.panes.indexOf(info);
@@ -813,6 +831,7 @@ class ElTerminalo {
       { name: CMD.PREV_PANE.name, desc: CMD.PREV_PANE.desc, category: CMD.PREV_PANE.category, shortcutDisplay: CMD.PREV_PANE.shortcut, action: () => this.navigateSpatial('left') },
       { name: CMD.NAV_PREV_COMMAND.name, desc: CMD.NAV_PREV_COMMAND.desc, category: CMD.NAV_PREV_COMMAND.category, shortcutDisplay: CMD.NAV_PREV_COMMAND.shortcut, action: () => { this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('prev'); } },
       { name: CMD.NAV_NEXT_COMMAND.name, desc: CMD.NAV_NEXT_COMMAND.desc, category: CMD.NAV_NEXT_COMMAND.category, shortcutDisplay: CMD.NAV_NEXT_COMMAND.shortcut, action: () => { this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('next'); } },
+      { name: CMD.SEARCH_HISTORY.name, desc: CMD.SEARCH_HISTORY.desc, category: CMD.SEARCH_HISTORY.category, shortcutDisplay: CMD.SEARCH_HISTORY.shortcut, action: () => { this.closePaletteIfOpen(); this.historyModal.show(); } },
       { name: CMD.AI_COMMAND.name, desc: CMD.AI_COMMAND.desc, category: CMD.AI_COMMAND.category, shortcutDisplay: CMD.AI_COMMAND.shortcut, action: () => { this.closePaletteIfOpen(); this.askAI.show(); } },
       ...(this.modelUpdateAvailable ? [{ name: CMD.UPDATE_MODEL.name, desc: CMD.UPDATE_MODEL.desc, category: CMD.UPDATE_MODEL.category, action: () => { this.closePaletteIfOpen(); this.handleModelDownload(); } }] : []),
       { name: CMD.SESSION_STATUS.name, desc: CMD.SESSION_STATUS.desc, category: CMD.SESSION_STATUS.category, shortcutDisplay: CMD.SESSION_STATUS.shortcut, action: () => { this.closePaletteIfOpen(); this.statusModal.show(); } },
@@ -1049,6 +1068,13 @@ class ElTerminalo {
       }
     }
 
+    // History modal
+    if (this.historyModal.isOpen()) {
+      e.stopPropagation();
+      this.historyModal.handleKeydown(e);
+      return;
+    }
+
     // Status modal takes highest priority after wizards
     if (this.statusModal.isOpen()) {
       e.stopPropagation();
@@ -1122,6 +1148,11 @@ class ElTerminalo {
         e.preventDefault();
         const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || '';
         this.wizard.show(input);
+        return;
+      }
+      if (e.shiftKey && e.key.toLowerCase() === 'r') {
+        e.preventDefault();
+        this.historyModal.show();
         return;
       }
       if (e.shiftKey && e.key === '\\') {

@@ -41,6 +41,7 @@ export const CMD = {
   NAV_NEXT_COMMAND: cmd('Next Command',       'Jump to next command prompt',               'CMD+SHIFT+↓',  'Navigation'),
 
   // General
+  SEARCH_HISTORY:   cmd('Search History',     'Search command history',                   'CMD+SHIFT+R',  'General'),
   AI_COMMAND:       cmd('AI Command',         'Generate a shell command from natural language', 'CMD+K',   'General'),
   SESSION_STATUS:   cmd('Session Status',     'Show running commands across all panes',   'CMD+I',        'General'),
   COMMAND_PALETTE:  cmd('Command Palette',    'Open command palette',                     'CMD+P',        'General'),

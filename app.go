@@ -12,6 +12,7 @@ import (
 
 	"github.com/albinanto/elterminalo/internal/commands"
 	"github.com/albinanto/elterminalo/internal/config"
+	"github.com/albinanto/elterminalo/internal/history"
 	"github.com/albinanto/elterminalo/internal/llm"
 	"github.com/albinanto/elterminalo/internal/ptymanager"
 	"github.com/albinanto/elterminalo/internal/shellintegration"
@@ -38,6 +39,7 @@ type App struct {
 	llmMu          sync.Mutex
 	llmIdleTimer   *time.Timer
 	downloadCancel context.CancelFunc
+	historyStore   *history.Store
 }
 
 // NewApp creates a new App instance.
@@ -64,6 +66,13 @@ func (a *App) startup(ctx context.Context) {
 
 	// Install shell integration scripts (zsh/bash hooks for OSC 133)
 	shellintegration.Install(a.cfg.Dir())
+
+	// Initialize command history database
+	if store, err := history.NewStore(a.cfg.Dir()); err == nil {
+		a.historyStore = store
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: history db: %v\n", err)
+	}
 
 	// Clean up partial downloads and old model versions
 	llm.CleanStaleFiles(a.cfg.Dir())
@@ -104,6 +113,11 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 
 	a.ptyMgr.CloseAll()
+
+	// Close history database
+	if a.historyStore != nil {
+		a.historyStore.Close()
+	}
 
 	// Stop idle timer and free LLM model
 	if a.llmIdleTimer != nil {
@@ -375,6 +389,34 @@ func (a *App) AskAI(prompt string, cwd string) (string, error) {
 // SaveDroppedFile saves base64-encoded file data to a temp directory
 // and returns the full path. Used for HTML5 drag-and-drop.
 // Files are cleaned up when the app shuts down.
+// RecordCommand records a completed command in the history database.
+func (a *App) RecordCommand(command, cwd string, exitCode int, sessionID string) error {
+	if a.historyStore == nil {
+		return nil
+	}
+	return a.historyStore.Add(command, cwd, exitCode, filepath.Base(a.shell), sessionID)
+}
+
+// SearchHistory searches command history with CWD-contextual results first.
+func (a *App) SearchHistory(query, cwd string, limit int) history.SearchResult {
+	if a.historyStore == nil {
+		return history.SearchResult{CWDMatches: []history.Entry{}, GlobalMatches: []history.Entry{}}
+	}
+	result, err := a.historyStore.Search(history.SearchParams{Query: query, CWD: cwd, Limit: limit})
+	if err != nil {
+		return history.SearchResult{CWDMatches: []history.Entry{}, GlobalMatches: []history.Entry{}}
+	}
+	return result
+}
+
+// ClearHistory removes all command history.
+func (a *App) ClearHistory() error {
+	if a.historyStore == nil {
+		return nil
+	}
+	return a.historyStore.Clear()
+}
+
 func (a *App) SaveDroppedFile(fileName string, dataBase64 string) (string, error) {
 	if a.dropDir == "" {
 		return "", fmt.Errorf("drop directory not available")

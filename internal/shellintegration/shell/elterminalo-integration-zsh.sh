@@ -25,7 +25,10 @@ __elterminalo_precmd() {
 
 __elterminalo_preexec() {
   __elterminalo_osc133 "B"
-  __elterminalo_osc133 "C"
+  # Encode command text and attach to C mark for history tracking
+  local cmd_b64
+  cmd_b64=$(builtin printf '%s' "$1" | base64 | tr -d '\n')
+  __elterminalo_osc133 "C;cmd=${cmd_b64}"
   __elterminalo_cmd_executed=1
 }
 

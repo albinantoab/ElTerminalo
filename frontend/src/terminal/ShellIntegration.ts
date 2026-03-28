@@ -6,6 +6,7 @@ export interface CommandBlock {
   outputStartMarker: IMarker | null;
   outputEndMarker: IMarker | null;
   exitCode: number | null;
+  commandText: string | null;
   decorations: IDecoration[];
 }
 
@@ -33,7 +34,7 @@ export class ShellIntegration {
       switch (mark) {
         case 'A': this.handlePromptStart(); break;
         case 'B': this.handleCommandStart(); break;
-        case 'C': this.handleOutputStart(); break;
+        case 'C': this.handleOutputStart(data); break;
         case 'D': this.handleCommandFinished(parseInt(parts[1] || '0', 10)); break;
       }
       return true;
@@ -57,6 +58,7 @@ export class ShellIntegration {
       outputStartMarker: null,
       outputEndMarker: null,
       exitCode: null,
+      commandText: null,
       decorations: [],
     };
 
@@ -77,10 +79,18 @@ export class ShellIntegration {
     if (marker) this.currentBlock.commandStartMarker = marker;
   }
 
-  private handleOutputStart(): void {
+  private handleOutputStart(data: string): void {
     if (!this.currentBlock) return;
     const marker = this.terminal.registerMarker(0);
     if (marker) this.currentBlock.outputStartMarker = marker;
+
+    // Parse command text from C mark: "C;cmd=<base64>"
+    const cmdMatch = data.match(/cmd=([A-Za-z0-9+/=]+)/);
+    if (cmdMatch) {
+      try {
+        this.currentBlock.commandText = atob(cmdMatch[1]);
+      } catch { /* invalid base64 */ }
+    }
   }
 
   private handleCommandFinished(exitCode: number): void {

@@ -24,12 +24,30 @@ export interface WailsApp {
   CheckForUpdate(): Promise<UpdateInfo>;
   ApplyUpdate(): Promise<void>;
   AskAI(prompt: string, cwd: string): Promise<string>;
+  RecordCommand(command: string, cwd: string, exitCode: number, sessionID: string): Promise<void>;
+  SearchHistory(query: string, cwd: string, limit: number): Promise<HistorySearchResult>;
+  ClearHistory(): Promise<void>;
   IsModelReady(): Promise<boolean>;
   IsModelDownloaded(): Promise<boolean>;
   DownloadModel(): Promise<void>;
   SkipDownload(): Promise<void>;
   CheckModelUpdate(): Promise<boolean>;
   InitLLM(): Promise<void>;
+}
+
+export interface HistoryEntry {
+  id: number;
+  command: string;
+  cwd: string;
+  exitCode: number;
+  shell: string;
+  timestamp: number;
+  sessionId: string;
+}
+
+export interface HistorySearchResult {
+  cwdMatches: HistoryEntry[];
+  globalMatches: HistoryEntry[];
 }
 
 export interface UpdateInfo {

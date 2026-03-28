@@ -6,6 +6,7 @@ require (
 	github.com/AshkanYarmoradi/go-llama.cpp v0.0.0-20260318205202-4189a5b8fd8e
 	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0
+	github.com/mattn/go-sqlite3 v1.14.37
 	github.com/wailsapp/wails/v2 v2.11.0
 	golang.org/x/sys v0.42.0
 )
