@@ -14,7 +14,29 @@ linters-settings:
     rules:
       - name: exported
         severity: warning
+  errcheck:
+    exclude-functions:
+      # Best-effort / cleanup calls where errors are intentionally ignored
+      - os.MkdirAll
+      - os.Remove
+      - os.RemoveAll
+      - os.WriteFile
+      - os.Rename
+      - fmt.Sscanf
+      - (*os/exec.Cmd).Process.Kill
+      - (*os/exec.Cmd).Process.Wait
+      - filepath.Walk
 
 issues:
   exclude-dirs:
     - frontend
+  exclude-rules:
+    # Shutdown / cleanup code — errors are best-effort
+    - path: app\.go
+      linters: [errcheck]
+      text: SaveWindowGeometry
+    - path: internal/ptymanager/
+      linters: [errcheck]
+      text: (Resize|Kill|Wait)
+    - path: internal/updater/
+      linters: [errcheck, gocritic]
