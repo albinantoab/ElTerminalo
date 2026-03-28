@@ -66,7 +66,7 @@ func (a *App) startup(ctx context.Context) {
 	updater.CleanupStaleBackup()
 
 	// Install shell integration scripts (zsh/bash hooks for OSC 133)
-	shellintegration.Install(a.cfg.Dir())
+	_ = shellintegration.Install(a.cfg.Dir())
 
 	// Initialize command history database
 	if store, err := history.NewStore(a.cfg.Dir()); err == nil {
