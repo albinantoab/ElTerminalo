@@ -1,14 +1,11 @@
-/* Command palette */
+/* Command palette — classified terminal style */
 #palette-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   justify-content: center;
-  padding-top: 80px;
+  align-items: center;
   z-index: 1000;
 }
 
@@ -18,57 +15,63 @@
 
 .palette-box {
   background: var(--bg);
-  border: 1px solid var(--accent);
-  border-radius: 10px;
+  border: 1px solid #3a3a4e;
+  border-top: 2px solid #3a3a4e;
+  border-radius: var(--radius);
   width: 480px;
   max-height: 60vh;
   overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.6);
   display: flex;
   flex-direction: column;
 }
 
 .palette-input {
   padding: 14px 16px;
-  background: transparent;
+  background: var(--status-bg);
   border: none;
   border-bottom: 1px solid var(--border);
   color: var(--fg);
   font-family: inherit;
-  font-size: 14px;
+  font-size: 13px;
   outline: none;
   width: 100%;
+  letter-spacing: 0.5px;
 }
 
 .palette-input::placeholder {
-  color: var(--border);
+  color: #4b5563;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 11px;
 }
 
 .palette-list {
   overflow-y: auto;
-  padding: 6px 0;
+  padding: 4px 0;
   flex: 1;
 }
 
 .palette-list::-webkit-scrollbar {
   display: block;
-  width: 4px;
+  width: 3px;
 }
 
 .palette-list::-webkit-scrollbar-thumb {
   background: #4b5563;
-  border-radius: 2px;
+  border-radius: 0;
 }
 
 .palette-group-header {
-  padding: 6px 16px 4px;
-  font-size: 10px;
-  font-weight: 600;
-  color: #6b7280;
+  padding: 8px 16px 4px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #9ca3af;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.5px;
   border-top: 1px solid var(--border);
-  margin-top: 4px;
+  margin-top: 2px;
+  border-left: 2px solid #3a3a4e;
 }
 
 .palette-group-header:first-child {
@@ -77,17 +80,20 @@
 }
 
 .palette-item {
-  padding: 8px 16px;
+  padding: 7px 16px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   cursor: pointer;
   gap: 10px;
+  border-left: 2px solid transparent;
+  transition: border-color 0.1s, background 0.1s;
 }
 
 .palette-item:hover,
 .palette-item.selected {
-  background: var(--border);
+  background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+  border-left-color: var(--accent);
 }
 
 .palette-item-text {
@@ -100,28 +106,29 @@
 .palette-item-name {
   color: var(--fg);
   font-weight: 500;
+  font-size: 12px;
 }
 
 .palette-item-desc {
   color: #6b7280;
-  font-size: 11px;
+  font-size: 10px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .palette-item-shortcut {
-  color: color-mix(in srgb, var(--accent) 80%, #9ca3af);
+  color: #9ca3af;
   background: var(--status-bg);
-  padding: 2px 6px;
-  border-radius: 3px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   font-family: inherit;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 600;
   white-space: nowrap;
+  text-transform: uppercase;
 }
-
-
 
 .palette-item-actions {
   display: flex;
@@ -138,13 +145,13 @@
 .palette-action {
   cursor: pointer;
   font-size: 12px;
-  color: var(--border);
+  color: #6b7280;
   padding: 2px 4px;
-  border-radius: 3px;
+  border-radius: var(--radius);
 }
 
 .palette-action:hover {
-  color: var(--accent);
+  color: var(--fg);
   background: var(--status-bg);
 }
 
@@ -153,21 +160,38 @@
 }
 
 .palette-hint {
-  padding: 10px 16px;
+  padding: 8px 16px;
   border-top: 1px solid var(--border);
   color: #6b7280;
-  font-size: 11px;
-  text-align: center;
-  line-height: 1.8;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 10px 0;
 }
 
 .palette-hint kbd {
-  color: color-mix(in srgb, var(--accent) 80%, #9ca3af);
-  background: var(--bg);
-  padding: 2px 6px;
-  border-radius: 3px;
+  color: #9ca3af;
+  background: var(--status-bg);
+  padding: 3px 5px 1px;
+  border: 1px solid var(--border);
+  border-radius: 0;
   font-family: inherit;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
 }
 
+.palette-hint-item {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.palette-hint-sep {
+  color: var(--border);
+  margin: 0 5px;
+}

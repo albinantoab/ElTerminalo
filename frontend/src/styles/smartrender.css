@@ -1,61 +1,65 @@
-/* Smart output rendering — per-command badges + panel */
+/* Smart output rendering — classified terminal style */
 
 .smart-badge {
   position: fixed;
   z-index: 500;
-  display: flex;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
   cursor: pointer;
-  background: var(--bg);
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: 10px;
-  font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 15%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 0;
+  padding: 4px 8px 2px;
+  font-size: 9px;
+  font-weight: 700;
   color: var(--accent);
-  letter-spacing: 0.5px;
-  display: flex;
-  align-items: center;
+  letter-spacing: 1px;
+  text-transform: uppercase;
   gap: 4px;
-  opacity: 0.6;
+  opacity: 0.7;
   transition: opacity 0.15s, background 0.15s;
 }
 
 .smart-badge:hover {
   opacity: 1;
-  background: var(--border);
+  background: color-mix(in srgb, var(--accent) 25%, var(--bg));
   color: var(--fg);
 }
 
 .smart-badge-active {
   opacity: 1;
-  background: var(--accent);
-  color: #fff;
+  background: color-mix(in srgb, var(--accent) 25%, var(--bg));
+  color: var(--accent);
   border-color: var(--accent);
 }
 
 .smart-badge-active:hover {
-  background: var(--accent-dim);
-  color: #fff;
+  background: color-mix(in srgb, var(--accent) 35%, var(--bg));
+  color: var(--fg);
 }
 
 .smart-badge-active .smart-badge-dot,
 .smart-badge-active .smart-badge-dot-error {
-  background: #fff;
-}
-
-.smart-badge-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
   background: var(--accent);
 }
 
+.smart-badge-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 0;
+  background: var(--accent);
+  flex-shrink: 0;
+  transform: translateY(-1px);
+}
+
 .smart-badge-dot-error {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 0;
   background: #f85149;
+  flex-shrink: 0;
+  transform: translateY(-1px);
 }
 
 .smart-panel {
@@ -64,9 +68,7 @@
   display: flex;
   flex-direction: column;
   background: var(--status-bg);
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
+  border-top: 1px solid #3a3a4e;
   max-height: 50%;
 }
 
@@ -77,14 +79,15 @@
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  border-left: 2px solid var(--accent);
 }
 
 .smart-panel-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--fg);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.5px;
 }
 
 .smart-panel-actions {
@@ -96,9 +99,11 @@
 .smart-panel-action {
   cursor: pointer;
   color: #6b7280;
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 3px;
+  font-size: 10px;
+  padding: 3px 6px 1px;
+  border-radius: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .smart-panel-action:hover {
@@ -107,12 +112,15 @@
 }
 
 .smart-panel-close {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   color: #6b7280;
   font-size: 16px;
-  line-height: 1;
-  padding: 0 4px;
-  border-radius: 3px;
+  border-radius: 0;
 }
 
 .smart-panel-close:hover {
@@ -128,12 +136,12 @@
 
 .smart-panel-content::-webkit-scrollbar {
   display: block;
-  width: 4px;
+  width: 3px;
 }
 
 .smart-panel-content::-webkit-scrollbar-thumb {
   background: #4b5563;
-  border-radius: 2px;
+  border-radius: 0;
 }
 
 /* JSON */
@@ -153,52 +161,58 @@
 /* Table */
 .smart-table-grid { border-collapse: collapse; width: 100%; }
 .smart-table-grid th {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid #3a3a4e;
   padding: 6px 8px;
   text-align: left;
-  color: var(--accent);
+  color: var(--fg);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-  font-weight: 600;
-  font-size: 11px;
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
   position: sticky;
   top: 0;
   background: var(--status-bg);
   z-index: 1;
 }
-.smart-table-grid th:hover { color: var(--fg); }
+.smart-table-grid th:hover { color: var(--accent); }
 .smart-table-grid td {
   padding: 2px 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 11px;
 }
 .smart-table-grid tbody tr:hover {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
 .smart-table-more {
   text-align: center;
   padding: 4px;
-  color: var(--accent);
-  font-size: 11px;
+  color: #9ca3af;
+  font-size: 10px;
   cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
-.smart-table-more:hover { text-decoration: underline; }
+.smart-table-more:hover { text-decoration: underline; color: var(--fg); }
 
 /* Error */
 .smart-error-header {
   padding: 4px 8px;
-  font-weight: 600;
-  font-size: 12px;
+  font-weight: 700;
+  font-size: 11px;
   display: flex;
   align-items: center;
   gap: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 .smart-error-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 0;
   background: #f85149;
   display: inline-block;
 }
@@ -206,7 +220,7 @@
   padding: 0 8px;
   margin: 0;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 11px;
   white-space: pre-wrap;
   word-break: break-all;
   line-height: 1.4;
@@ -223,12 +237,15 @@
 /* Shell integration — last command exit code in status bar */
 .status-exit-ok {
   color: #56d364;
-  font-size: 11px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .status-exit-fail {
   color: #f85149;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
-

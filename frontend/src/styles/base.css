@@ -53,7 +53,8 @@
   --status-fg: #5e17eb;
   --cursor-color: #5e17eb;
   --selection-bg: #2a1a4e;
-  --titlebar-height: 28px;
+  --titlebar-height: 32px;
+  --radius: 0px;
 }
 
 * {
@@ -81,5 +82,57 @@ html, body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+}
+
+/* Corner bracket decoration — applied to modals and active elements */
+.palette-box,
+.status-modal-box,
+.ai-box,
+.history-box,
+.wizard-box,
+.theme-wizard-box,
+.update-dialog,
+.smart-panel {
+  position: relative;
+}
+
+.palette-box::after,
+.status-modal-box::after,
+.ai-box::after,
+.history-box::after,
+.wizard-box::after,
+.theme-wizard-box::after,
+.update-dialog::after,
+.smart-panel::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  z-index: 2;
+  --cb-color: #9ca3af;
+  --cb-size: 6px;
+  --cb-width: 2px;
+  background:
+    linear-gradient(var(--cb-color), var(--cb-color)) 0 0 / var(--cb-size) var(--cb-width) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 0 0 / var(--cb-width) var(--cb-size) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 100% 0 / var(--cb-size) var(--cb-width) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 100% 0 / var(--cb-width) var(--cb-size) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 0 100% / var(--cb-size) var(--cb-width) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 0 100% / var(--cb-width) var(--cb-size) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 100% 100% / var(--cb-size) var(--cb-width) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 100% 100% / var(--cb-width) var(--cb-size) no-repeat;
+}
+
+/* Classified terminal utility classes */
+kbd {
+  color: #9ca3af;
+  background: var(--status-bg);
+  padding: 3px 5px 1px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
 }
 

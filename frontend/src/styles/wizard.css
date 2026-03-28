@@ -1,14 +1,11 @@
-/* Create Command Wizard */
+/* Create Command Wizard — classified terminal style */
 #wizard-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   justify-content: center;
-  padding-top: 80px;
+  align-items: center;
   z-index: 1000;
 }
 
@@ -18,10 +15,11 @@
 
 .wizard-box {
   background: var(--bg);
-  border: 1px solid var(--accent);
-  border-radius: 10px;
+  border: 1px solid #3a3a4e;
+  border-top: 2px solid #3a3a4e;
+  border-radius: var(--radius);
   width: 440px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.6);
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
@@ -30,31 +28,39 @@
 }
 
 .wizard-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  border-left: 2px solid var(--accent);
+  padding-left: 10px;
 }
 
 .wizard-step-label {
-  font-size: 12px;
-  color: var(--accent-dim);
+  font-size: 10px;
+  color: #6b7280;
   margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 600;
 }
 
 .wizard-input {
   padding: 10px 12px;
   background: var(--status-bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--fg);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   outline: none;
   width: 100%;
 }
 
 .wizard-input:focus {
-  border-color: var(--accent);
+  border-color: #3a3a4e;
+  border-left: 2px solid var(--accent);
 }
 
 .input-error {
@@ -78,66 +84,72 @@
   flex: 1;
   padding: 10px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--status-bg);
   color: var(--fg);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
   text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: border-color 0.15s, color 0.15s;
 }
 
 .wizard-scope-btn:hover,
 .wizard-scope-btn.wizard-scope-active {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--border);
+  border-color: #3a3a4e;
+  border-left: 2px solid var(--accent);
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 5%, var(--bg));
 }
 
 .wizard-shortcut-capture {
   padding: 12px 14px;
   background: var(--status-bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--fg);
   font-family: inherit;
-  font-size: 14px;
+  font-size: 13px;
   text-align: center;
   min-height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
+  text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
 .wizard-conflict {
   color: #f85149;
-  font-size: 12px;
+  font-size: 11px;
   text-align: center;
   padding: 4px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .wizard-hint {
-  font-size: 11px;
+  font-size: 10px;
   color: #6b7280;
   text-align: center;
   flex-shrink: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 /* Theme Wizard */
 #theme-wizard-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
   display: flex;
   justify-content: center;
-  align-items: flex-start;
-  padding-top: 40px;
+  align-items: center;
   z-index: 400;
 }
 
@@ -147,20 +159,23 @@
 
 .theme-wizard-box {
   background: var(--bg);
-  border: 1px solid var(--accent);
-  border-radius: 10px;
+  border: 1px solid #3a3a4e;
+  border-top: 2px solid #3a3a4e;
+  border-radius: var(--radius);
   width: 540px;
   max-height: calc(100vh - 80px);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.6);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
 .theme-wizard-header {
-  padding: 16px 20px 12px;
+  padding: 14px 20px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  background: var(--status-bg);
+  border-left: 2px solid var(--accent);
 }
 
 .theme-wizard-body {
@@ -171,12 +186,12 @@
 
 .theme-wizard-body::-webkit-scrollbar {
   display: block;
-  width: 4px;
+  width: 3px;
 }
 
 .theme-wizard-body::-webkit-scrollbar-thumb {
   background: #4b5563;
-  border-radius: 2px;
+  border-radius: 0;
 }
 
 .theme-wizard-footer {
@@ -189,12 +204,14 @@
 }
 
 .theme-group-label {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  color: #9ca3af;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.5px;
   margin: 14px 0 6px;
+  border-left: 2px solid #3a3a4e;
+  padding-left: 8px;
 }
 
 .theme-fields-grid {
@@ -215,15 +232,17 @@
 
 .theme-field-name .theme-field-input {
   flex: 1;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
 }
 
 .theme-field-label {
-  font-size: 11px;
+  font-size: 10px;
   color: #6b7280;
   min-width: 80px;
   white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .theme-field-input-wrap {
@@ -234,9 +253,9 @@
 }
 
 .theme-color-swatch {
-  width: 16px;
-  height: 16px;
-  border-radius: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius);
   border: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -244,28 +263,30 @@
 .theme-field-input {
   background: var(--status-bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius);
   color: var(--fg);
   font-family: inherit;
-  font-size: 11px;
-  padding: 4px 6px;
+  font-size: 10px;
+  padding: 3px 6px;
   outline: none;
   width: 80px;
 }
 
 .theme-field-input:focus {
-  border-color: var(--accent);
+  border-color: #3a3a4e;
 }
 
 .theme-btn {
   padding: 6px 16px;
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 600;
   cursor: pointer;
   border: 1px solid var(--border);
   transition: background 0.15s, border-color 0.15s;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .theme-btn-cancel {
@@ -287,4 +308,3 @@
 .theme-btn-save:hover {
   opacity: 0.9;
 }
-

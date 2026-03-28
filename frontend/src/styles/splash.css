@@ -1,4 +1,4 @@
-/* ── Splash Screen ── */
+/* ── Splash Screen — classified terminal boot sequence ── */
 #splash {
   position: fixed;
   inset: 0;
@@ -12,7 +12,7 @@
 
 #splash.splash-exit {
   opacity: 0;
-  transform: scale(1.04);
+  transform: scale(1.02);
   pointer-events: none;
 }
 
@@ -20,25 +20,26 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 24px;
+  gap: 20px;
 }
 
 .splash-logo {
-  width: 96px;
-  height: 96px;
-  border-radius: 18px;
+  width: 80px;
+  height: 80px;
+  border-radius: 4px;
+  border: 1px solid #1a1a2e;
   animation: splashLogoIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @keyframes splashLogoIn {
   0% {
     opacity: 0;
-    transform: scale(0.5) rotate(-8deg);
-    filter: blur(8px);
+    transform: scale(0.8);
+    filter: blur(4px);
   }
   100% {
     opacity: 1;
-    transform: scale(1) rotate(0deg);
+    transform: scale(1);
     filter: blur(0);
   }
 }
@@ -53,7 +54,7 @@
 @keyframes splashTextIn {
   0% {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(8px);
   }
   100% {
     opacity: 1;
@@ -63,9 +64,10 @@
 
 .splash-title {
   font-family: 'MonaspiceNe NFM', 'SF Mono', monospace;
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: 2px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  text-transform: uppercase;
   background: linear-gradient(135deg, #5e17eb 0%, #e94560 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -74,7 +76,7 @@
 
 .splash-cursor {
   font-family: 'MonaspiceNe NFM', 'SF Mono', monospace;
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 300;
   color: #5e17eb;
   animation: splashBlink 0.8s step-end infinite;
@@ -86,24 +88,27 @@
 }
 
 .splash-loader {
-  width: 120px;
-  height: 2px;
-  background: #1a1a2e;
-  border-radius: 1px;
+  width: 160px;
+  height: 10px;
+  background-color: transparent;
+  background-image: radial-gradient(circle, #3a3a4e 1px, transparent 1px);
+  background-size: 4px 4px;
+  border-radius: 0;
   overflow: hidden;
   animation: splashLoaderIn 0.5s 0.6s ease both;
+  border: 1px solid #1a1a2e;
 }
 
 @keyframes splashLoaderIn {
   0% { opacity: 0; width: 0; }
-  100% { opacity: 1; width: 120px; }
+  100% { opacity: 1; width: 160px; }
 }
 
 .splash-loader-bar {
   height: 100%;
   width: 0%;
   background: linear-gradient(90deg, #5e17eb, #e94560);
-  border-radius: 1px;
+  border-radius: 0;
   animation: splashProgress 1.8s 0.8s cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
@@ -117,10 +122,11 @@
 
 .splash-status {
   font-family: 'MonaspiceNe NFM', 'SF Mono', monospace;
-  font-size: 11px;
+  font-size: 10px;
   color: #6b7280;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.5px;
   min-height: 16px;
+  text-transform: uppercase;
   animation: splashTextIn 0.4s 1.2s ease both;
 }
 
@@ -129,4 +135,3 @@
   animation: none;
   transition: width 0.3s ease;
 }
-

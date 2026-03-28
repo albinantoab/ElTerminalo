@@ -1,4 +1,4 @@
-/* Split pane layout */
+/* Split pane layout — classified terminal style */
 .pane-split-vertical {
   display: flex;
   flex-direction: row;
@@ -17,7 +17,7 @@
   position: relative;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0;
   margin: 2px;
   display: flex;
   flex-direction: column;
@@ -25,7 +25,28 @@
 
 .pane-leaf.active {
   border-color: var(--border-active);
-  box-shadow: 0 0 0 1px var(--border-active);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-active) 30%, transparent);
+  position: relative;
+}
+
+.pane-leaf.active::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  z-index: 2;
+  --cb-color: var(--border-active);
+  --cb-size: 6px;
+  --cb-width: 2px;
+  background:
+    linear-gradient(var(--cb-color), var(--cb-color)) 0 0 / var(--cb-size) var(--cb-width) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 0 0 / var(--cb-width) var(--cb-size) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 100% 0 / var(--cb-size) var(--cb-width) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 100% 0 / var(--cb-width) var(--cb-size) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 0 100% / var(--cb-size) var(--cb-width) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 0 100% / var(--cb-width) var(--cb-size) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 100% 100% / var(--cb-size) var(--cb-width) no-repeat,
+    linear-gradient(var(--cb-color), var(--cb-color)) 100% 100% / var(--cb-width) var(--cb-size) no-repeat;
 }
 
 .app-blurred .pane-leaf.active {
@@ -40,9 +61,9 @@
   bottom: 0;
   left: 0;
   right: 0;
-  height: 1px;
+  height: 2px;
   background: linear-gradient(90deg, transparent, var(--border-active), #7c3aed, var(--border-active), transparent);
-  border-radius: 0 0 6px 6px;
+  border-radius: 0;
   box-shadow: 0 0 12px 4px color-mix(in srgb, var(--border-active) 50%, transparent),
               0 0 28px 8px color-mix(in srgb, var(--border-active) 25%, transparent);
   animation: aiGlowPulse 1.8s ease-in-out infinite;
@@ -61,7 +82,7 @@
 
 /* Draggable dividers between split panes */
 .pane-divider-v {
-  width: 6px;
+  width: 4px;
   cursor: col-resize;
   background: transparent;
   position: relative;
@@ -70,7 +91,7 @@
 }
 
 .pane-divider-h {
-  height: 6px;
+  height: 4px;
   cursor: row-resize;
   background: transparent;
   position: relative;
@@ -82,6 +103,4 @@
 .pane-divider-h:hover {
   background: var(--accent-dim);
   opacity: 0.5;
-  border-radius: 3px;
 }
-

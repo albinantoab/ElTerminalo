@@ -1,11 +1,11 @@
-/* Status Modal */
+/* Status Modal — classified terminal style */
 #status-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   justify-content: center;
-  padding-top: 80px;
+  align-items: center;
   z-index: 1000;
 }
 
@@ -15,69 +15,78 @@
 
 .status-modal-box {
   background: var(--bg);
-  border: 1px solid var(--accent);
-  border-radius: 10px;
+  border: 1px solid #3a3a4e;
+  border-top: 2px solid #3a3a4e;
+  border-radius: var(--radius);
   width: 520px;
   max-height: 420px;
   overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.6);
   display: flex;
   flex-direction: column;
 }
 
 .status-modal-header {
-  padding: 14px 16px 10px;
+  padding: 12px 16px 10px;
   border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  background: var(--status-bg);
+  border-left: 2px solid var(--accent);
 }
 
 .status-modal-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
 }
 
 .status-modal-refresh {
-  font-size: 10px;
-  color: #6b7280;
-}
-
-.status-modal-list {
-  overflow-y: auto;
-  padding: 6px 0;
-  flex: 1;
-}
-
-.status-modal-list::-webkit-scrollbar {
-  display: block;
-  width: 4px;
-}
-
-.status-modal-list::-webkit-scrollbar-thumb {
-  background: #4b5563;
-  border-radius: 2px;
-}
-
-.status-modal-group {
-  padding: 8px 16px 4px;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 9px;
   color: #6b7280;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
+.status-modal-list {
+  overflow-y: auto;
+  padding: 4px 0;
+  flex: 1;
+}
+
+.status-modal-list::-webkit-scrollbar {
+  display: block;
+  width: 3px;
+}
+
+.status-modal-list::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 0;
+}
+
+.status-modal-group {
+  padding: 8px 16px 4px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  border-left: 2px solid #3a3a4e;
+}
+
 .status-modal-active-tag {
   color: var(--accent);
-  font-weight: 600;
-  text-transform: lowercase;
+  font-weight: 700;
+  text-transform: uppercase;
   margin-left: 6px;
-  font-size: 9px;
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  padding: 1px 5px;
-  border-radius: 3px;
+  font-size: 8px;
+  letter-spacing: 1px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  padding: 0px 4px;
+  border-radius: var(--radius);
 }
 
 .status-modal-row {
@@ -85,11 +94,14 @@
   align-items: center;
   padding: 7px 16px;
   gap: 12px;
+  border-left: 2px solid transparent;
+  transition: border-color 0.1s, background 0.1s;
 }
 
 .status-modal-row:hover,
 .status-modal-row.selected {
-  background: var(--border);
+  background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+  border-left-color: var(--accent);
   cursor: pointer;
 }
 
@@ -102,9 +114,9 @@
 }
 
 .status-modal-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 0;
   flex-shrink: 0;
 }
 
@@ -130,9 +142,11 @@
 }
 
 .status-modal-pane {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--fg);
-  font-weight: 500;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .status-modal-mid {
@@ -142,19 +156,19 @@
 
 .status-modal-cmd {
   color: #56d364;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
 }
 
 .status-modal-idle {
   color: #6b7280;
-  font-size: 12px;
+  font-size: 11px;
   font-style: italic;
 }
 
 .status-modal-right {
   color: #6b7280;
-  font-size: 11px;
+  font-size: 10px;
   text-align: right;
   max-width: 180px;
   overflow: hidden;
@@ -168,39 +182,41 @@
 .status-modal-empty {
   padding: 20px 16px;
   color: #6b7280;
-  font-size: 12px;
+  font-size: 11px;
   text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
 .status-modal-footer {
-  padding: 10px 16px;
+  padding: 8px 16px;
   border-top: 1px solid var(--border);
   color: #6b7280;
-  font-size: 11px;
+  font-size: 10px;
   text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .status-modal-footer kbd {
-  color: color-mix(in srgb, var(--accent) 80%, #9ca3af);
-  background: var(--bg);
-  padding: 2px 6px;
-  border-radius: 3px;
+  color: #9ca3af;
+  background: var(--status-bg);
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
 }
 
 /* AI Command Overlay */
 #ai-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   justify-content: center;
-  padding-top: 80px;
+  align-items: center;
   z-index: 1000;
 }
 
@@ -210,10 +226,11 @@
 
 .ai-box {
   background: var(--bg);
-  border: 1px solid var(--accent);
-  border-radius: 10px;
+  border: 1px solid #3a3a4e;
+  border-top: 2px solid #3a3a4e;
+  border-radius: var(--radius);
   width: 480px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.6);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -224,40 +241,51 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px 8px;
+  padding: 10px 16px 8px;
+  background: var(--status-bg);
+  border-left: 2px solid var(--accent);
 }
 
 .ai-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
 }
 
 .ai-badge {
-  color: color-mix(in srgb, var(--accent) 80%, #9ca3af);
-  background: var(--status-bg);
-  padding: 2px 6px;
-  border-radius: 3px;
+  color: #6b7280;
+  background: transparent;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   font-family: inherit;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .ai-input {
   padding: 14px 16px;
-  background: transparent;
+  background: var(--status-bg);
   border: none;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   color: var(--fg);
   font-family: inherit;
-  font-size: 14px;
+  font-size: 13px;
   outline: none;
   width: 100%;
+  letter-spacing: 0.5px;
 }
 
 .ai-input::placeholder {
-  color: var(--border);
+  color: #4b5563;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 11px;
 }
 
 .ai-input:disabled {
@@ -274,7 +302,7 @@
   height: 100%;
   width: 30%;
   background: linear-gradient(90deg, var(--accent), #e94560);
-  border-radius: 1px;
+  border-radius: 0;
   animation: aiLoaderSlide 1s ease-in-out infinite;
 }
 
@@ -286,39 +314,44 @@
 .ai-error {
   padding: 8px 16px;
   color: #f85149;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.5;
+  border-left: 2px solid #f85149;
 }
 
 .ai-hint {
-  padding: 10px 16px;
+  padding: 8px 16px;
   border-top: 1px solid var(--border);
   color: #6b7280;
-  font-size: 11px;
+  font-size: 10px;
   text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .ai-tip {
-  padding: 8px 16px 10px;
+  padding: 6px 16px 8px;
   color: #4b5563;
-  font-size: 10px;
+  font-size: 9px;
   text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .ai-tip kbd {
-  color: color-mix(in srgb, var(--accent) 60%, #6b7280);
+  color: #6b7280;
   font-family: inherit;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 600;
 }
 
 .ai-hint kbd {
-  color: color-mix(in srgb, var(--accent) 80%, #9ca3af);
-  background: var(--bg);
-  padding: 2px 6px;
-  border-radius: 3px;
+  color: #9ca3af;
+  background: var(--status-bg);
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
 }
-

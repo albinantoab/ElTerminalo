@@ -162,7 +162,7 @@ export class CommandPalette {
         const input = this.overlay.querySelector('.palette-input') as HTMLInputElement;
         if (input && input.value !== this.query) input.value = this.query;
       } else {
-        this.overlay.innerHTML = `<div class="palette-box"><input class="palette-input" type="text" placeholder="Type a command..." value="${escHtml(this.query)}" /><div class="palette-list">${listHtml}</div><div class="palette-hint"><kbd>ENTER</kbd> execute · <kbd>${escHtml(CMD.FILL.shortcut)}</kbd> fill · <kbd>${escHtml(CMD.EDIT_COMMAND.shortcut)}</kbd> edit · <kbd>${escHtml(CMD.DELETE_COMMAND.shortcut)}</kbd> delete · <kbd>ESC</kbd> close</div></div>`;
+        this.overlay.innerHTML = `<div class="palette-box"><input class="palette-input" type="text" placeholder="Type a command..." value="${escHtml(this.query)}" /><div class="palette-list">${listHtml}</div><div class="palette-hint"><span class="palette-hint-item"><kbd>ENTER</kbd> execute</span><span class="palette-hint-sep">|</span><span class="palette-hint-item"><kbd>${escHtml(CMD.FILL.shortcut)}</kbd> fill</span><span class="palette-hint-sep">|</span><span class="palette-hint-item"><kbd>${escHtml(CMD.EDIT_COMMAND.shortcut)}</kbd> edit</span><span class="palette-hint-sep">|</span><span class="palette-hint-item"><kbd>${escHtml(CMD.DELETE_COMMAND.shortcut)}</kbd> delete</span><span class="palette-hint-sep">|</span><span class="palette-hint-item"><kbd>ESC</kbd> close</span></div></div>`;
 
         const input = this.overlay.querySelector('.palette-input') as HTMLInputElement;
         input.oninput = (e) => {

@@ -726,24 +726,24 @@ class ElTerminalo {
 
   private renderStatusBar(): void {
     const updateBadge = this.updateInfo?.available
-      ? `<a class="status-update" id="status-update-link">Update v${escHtml(this.updateInfo.latestVersion)} available</a><span class="status-sep">·</span>`
+      ? `<a class="status-update" id="status-update-link">Update v${escHtml(this.updateInfo.latestVersion)} available</a><span class="status-sep">|</span>`
       : '';
 
     this.statusbar.innerHTML = `
       <div class="status-left">${updateBadge}</div>
       <div class="status-right">
         <span class="status-key">${CMD.AI_COMMAND.shortcut}</span><span class="status-label">ai</span>
-        <span class="status-sep">·</span>
-        <span class="status-key">${CMD.COMMAND_PALETTE.shortcut}</span><span class="status-label">commands</span>
-        <span class="status-sep">·</span>
+        <span class="status-sep">|</span>
+        <span class="status-key">${CMD.COMMAND_PALETTE.shortcut}</span><span class="status-label">cmds</span>
+        <span class="status-sep">|</span>
         <span class="status-key">${CMD.SESSION_STATUS.shortcut}</span><span class="status-label">status</span>
-        <span class="status-sep">·</span>
+        <span class="status-sep">|</span>
         <span class="status-key">${CMD.SPLIT_VERTICAL.shortcut}</span><span class="status-label">vsplit</span>
-        <span class="status-sep">·</span>
+        <span class="status-sep">|</span>
         <span class="status-key">${CMD.SPLIT_HORIZONTAL.shortcut}</span><span class="status-label">hsplit</span>
-        <span class="status-sep">·</span>
-        <span class="status-key">${CMD.CLOSE_PANE.shortcut}</span><span class="status-label">close pane</span>
-        <span class="status-sep">·</span>
+        <span class="status-sep">|</span>
+        <span class="status-key">${CMD.CLOSE_PANE.shortcut}</span><span class="status-label">close</span>
+        <span class="status-sep">|</span>
         <span class="status-key">${CMD.CLEAR_TERMINAL.shortcut}</span><span class="status-label">clear</span>
       </div>
     `;
