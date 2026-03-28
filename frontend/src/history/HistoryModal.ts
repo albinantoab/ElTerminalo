@@ -140,23 +140,30 @@ export class HistoryModal {
         items = '<div class="history-empty">No history found</div>';
       }
 
-      this.overlay.innerHTML = `
-        <div class="history-box">
-          <input class="history-input" type="text" placeholder="Search command history..." value="${escHtml(this.query)}" />
-          <div class="history-list">${items}</div>
-          <div class="history-footer">
-            <kbd>ENTER</kbd> paste · <kbd>${escHtml(CMD.FILL.shortcut)}</kbd> execute · <kbd>ESC</kbd> close
+      const existingList = this.overlay.querySelector('.history-list');
+      if (existingList) {
+        // Update only the list — preserve input focus
+        existingList.innerHTML = items;
+      } else {
+        // First render — build entire DOM
+        this.overlay.innerHTML = `
+          <div class="history-box">
+            <input class="history-input" type="text" placeholder="Search command history..." value="${escHtml(this.query)}" />
+            <div class="history-list">${items}</div>
+            <div class="history-footer">
+              <kbd>ENTER</kbd> paste · <kbd>${escHtml(CMD.FILL.shortcut)}</kbd> execute · <kbd>ESC</kbd> close
+            </div>
           </div>
-        </div>
-      `;
+        `;
 
-      const input = this.overlay.querySelector('.history-input') as HTMLInputElement;
-      if (input) {
-        input.oninput = (e) => {
-          this.query = (e.target as HTMLInputElement).value;
-          if (this.debounceTimer) clearTimeout(this.debounceTimer);
-          this.debounceTimer = setTimeout(() => this.fetchResults(), 150);
-        };
+        const input = this.overlay.querySelector('.history-input') as HTMLInputElement;
+        if (input) {
+          input.oninput = (e) => {
+            this.query = (e.target as HTMLInputElement).value;
+            if (this.debounceTimer) clearTimeout(this.debounceTimer);
+            this.debounceTimer = setTimeout(() => this.fetchResults(), 150);
+          };
+        }
       }
 
       this.overlay.querySelector('.history-row.selected')?.scrollIntoView({ block: 'nearest' });

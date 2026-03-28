@@ -84,6 +84,40 @@ html, body {
   height: 100vh;
 }
 
+/* Techno reveal animation — vertical line expands to full modal */
+@keyframes modalReveal {
+  0% {
+    clip-path: inset(0 50% 0 50%);
+    opacity: 0;
+  }
+  20% {
+    clip-path: inset(0 49.7% 0 49.7%);
+    opacity: 1;
+  }
+  35% {
+    clip-path: inset(0 49.5% 0 49.5%);
+    opacity: 1;
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+    opacity: 1;
+  }
+}
+
+@keyframes overlayFadeIn {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+#palette-overlay:not(.hidden),
+#status-overlay:not(.hidden),
+#ai-overlay:not(.hidden),
+#history-overlay:not(.hidden),
+#wizard-overlay:not(.hidden),
+#theme-wizard-overlay:not(.hidden) {
+  animation: overlayFadeIn 0.15s ease-out;
+}
+
 /* Corner bracket decoration — applied to modals and active elements */
 .palette-box,
 .status-modal-box,
@@ -94,6 +128,7 @@ html, body {
 .update-dialog,
 .smart-panel {
   position: relative;
+  animation: modalReveal 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .palette-box::after,

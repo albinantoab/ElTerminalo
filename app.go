@@ -101,12 +101,14 @@ func (a *App) ConfirmQuit() {
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	// Save window geometry before closing
-	w, h := wailsRuntime.WindowGetSize(ctx)
-	x, y := wailsRuntime.WindowGetPosition(ctx)
-	a.cfg.SaveWindowGeometry(config.WindowGeometry{
-		Width: w, Height: h, X: x, Y: y,
-	})
+	// Save window geometry before closing — skip if maximised or fullscreen
+	if !wailsRuntime.WindowIsMaximised(ctx) && !wailsRuntime.WindowIsFullscreen(ctx) {
+		w, h := wailsRuntime.WindowGetSize(ctx)
+		x, y := wailsRuntime.WindowGetPosition(ctx)
+		a.cfg.SaveWindowGeometry(config.WindowGeometry{
+			Width: w, Height: h, X: x, Y: y,
+		})
+	}
 
 	// Clean up dropped files
 	if a.dropDir != "" {
