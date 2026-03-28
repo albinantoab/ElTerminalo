@@ -19,6 +19,23 @@ Download the latest `.dmg` from [Releases](https://github.com/albinantoab/ElTerm
 - **GPU-accelerated rendering** — WebGL-powered terminal via xterm.js
 - **Native macOS look** — Transparent titlebar, proper window management
 
+## Demos
+
+### AI Assistant
+<video src="assets/videos/ai.mp4" width="100%" autoplay loop muted playsinline></video>
+
+### JSON Viewer
+<video src="assets/videos/json.mp4" width="100%" autoplay loop muted playsinline></video>
+
+### Table View
+<video src="assets/videos/table.mp4" width="100%" autoplay loop muted playsinline></video>
+
+### Custom Shortcuts
+<video src="assets/videos/shortcuts.mp4" width="100%" autoplay loop muted playsinline></video>
+
+### Status Modal
+<video src="assets/videos/status-modal.mp4" width="100%" autoplay loop muted playsinline></video>
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
