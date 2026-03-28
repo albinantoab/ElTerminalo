@@ -18,6 +18,16 @@ export function utf8ToBase64(str: string): string {
   return btoa(binary);
 }
 
+/** Strip ANSI escape codes (CSI, OSC, SGR) from a string to get plain text. */
+export function stripAnsi(text: string): string {
+  return text
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')   // CSI sequences (colors, cursor, etc.)
+    .replace(/\x1b\][^\x07]*\x07/g, '')       // OSC sequences (terminated by BEL)
+    .replace(/\x1b\][^\x1b]*\x1b\\/g, '')     // OSC sequences (terminated by ST)
+    .replace(/\x1b\([A-B]/g, '')              // Character set designators
+    .replace(/\x1b[=>]/g, '');                // Keypad modes
+}
+
 /** Base64-encode raw bytes. */
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';

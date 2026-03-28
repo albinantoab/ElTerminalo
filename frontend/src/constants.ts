@@ -36,6 +36,10 @@ export const CMD = {
   NEXT_PANE:        cmd('Next Pane',          'Focus the next pane',                      'CMD+→',        'Panes'),
   PREV_PANE:        cmd('Previous Pane',      'Focus the previous pane',                  'CMD+←',        'Panes'),
 
+  // Navigation
+  NAV_PREV_COMMAND: cmd('Previous Command',   'Jump to previous command prompt',           'CMD+SHIFT+↑',  'Navigation'),
+  NAV_NEXT_COMMAND: cmd('Next Command',       'Jump to next command prompt',               'CMD+SHIFT+↓',  'Navigation'),
+
   // General
   AI_COMMAND:       cmd('AI Command',         'Generate a shell command from natural language', 'CMD+K',   'General'),
   SESSION_STATUS:   cmd('Session Status',     'Show running commands across all panes',   'CMD+I',        'General'),
@@ -50,6 +54,7 @@ export const CMD = {
   COPY:             cmd('Copy',               'Copy selection',                           'CMD+C',        'Edit'),
   PASTE:            cmd('Paste',              'Paste from clipboard',                     'CMD+V',        'Edit'),
   SELECT_ALL:       cmd('Select All',         'Select all text',                          'CMD+A',        'Edit'),
+  COPY_LAST_OUTPUT: cmd('Copy Last Output',   'Copy the last command output to clipboard','',             'General'),
 
   // Palette hint keys (not full commands, just display labels)
   EDIT_COMMAND:     cmd('Edit',               'Edit selected command',                    'CMD+E',        ''),

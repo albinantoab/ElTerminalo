@@ -167,8 +167,11 @@ class ElTerminalo {
     document.addEventListener('dragover', (e) => e.preventDefault(), true);
     document.addEventListener('drop', async (e) => {
       e.preventDefault();
-      const ap = this.panes[this.activeIndex];
-      if (!ap?.pane.sessionId || !e.dataTransfer?.files?.length) return;
+      if (!e.dataTransfer?.files?.length) return;
+      // Find which pane the drop landed on
+      const target = e.target as HTMLElement;
+      const ap = this.panes.find(p => p.element.contains(target)) || this.panes[this.activeIndex];
+      if (!ap?.pane.sessionId) return;
       const paths: string[] = [];
       for (let i = 0; i < e.dataTransfer.files.length; i++) {
         const f = e.dataTransfer.files[i];
@@ -506,6 +509,8 @@ class ElTerminalo {
       closePane: () => this.closeActivePane(),
     });
 
+    pane.smartRender.onBadgesChanged = () => this.renderStatusBar();
+
     el.addEventListener('mousedown', (e) => {
       if (e.button === 2) return; // don't steal focus on right-click
       const idx = tab.panes.indexOf(info);
@@ -704,6 +709,7 @@ class ElTerminalo {
         this.promptUpdate();
       });
     }
+
   }
 
   private showCloseConfirmation(): void {
@@ -805,11 +811,14 @@ class ElTerminalo {
       { name: CMD.CLOSE_PANE.name, desc: CMD.CLOSE_PANE.desc, category: CMD.CLOSE_PANE.category, shortcutDisplay: CMD.CLOSE_PANE.shortcut, action: () => this.closeActivePane() },
       { name: CMD.NEXT_PANE.name, desc: CMD.NEXT_PANE.desc, category: CMD.NEXT_PANE.category, shortcutDisplay: CMD.NEXT_PANE.shortcut, action: () => this.navigateSpatial('right') },
       { name: CMD.PREV_PANE.name, desc: CMD.PREV_PANE.desc, category: CMD.PREV_PANE.category, shortcutDisplay: CMD.PREV_PANE.shortcut, action: () => this.navigateSpatial('left') },
+      { name: CMD.NAV_PREV_COMMAND.name, desc: CMD.NAV_PREV_COMMAND.desc, category: CMD.NAV_PREV_COMMAND.category, shortcutDisplay: CMD.NAV_PREV_COMMAND.shortcut, action: () => { this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('prev'); } },
+      { name: CMD.NAV_NEXT_COMMAND.name, desc: CMD.NAV_NEXT_COMMAND.desc, category: CMD.NAV_NEXT_COMMAND.category, shortcutDisplay: CMD.NAV_NEXT_COMMAND.shortcut, action: () => { this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('next'); } },
       { name: CMD.AI_COMMAND.name, desc: CMD.AI_COMMAND.desc, category: CMD.AI_COMMAND.category, shortcutDisplay: CMD.AI_COMMAND.shortcut, action: () => { this.closePaletteIfOpen(); this.askAI.show(); } },
       ...(this.modelUpdateAvailable ? [{ name: CMD.UPDATE_MODEL.name, desc: CMD.UPDATE_MODEL.desc, category: CMD.UPDATE_MODEL.category, action: () => { this.closePaletteIfOpen(); this.handleModelDownload(); } }] : []),
       { name: CMD.SESSION_STATUS.name, desc: CMD.SESSION_STATUS.desc, category: CMD.SESSION_STATUS.category, shortcutDisplay: CMD.SESSION_STATUS.shortcut, action: () => { this.closePaletteIfOpen(); this.statusModal.show(); } },
       { name: CMD.COMMAND_PALETTE.name, desc: CMD.COMMAND_PALETTE.desc, category: CMD.COMMAND_PALETTE.category, shortcutDisplay: CMD.COMMAND_PALETTE.shortcut, action: () => this.palette.show() },
       { name: CMD.CLEAR_TERMINAL.name, desc: CMD.CLEAR_TERMINAL.desc, category: CMD.CLEAR_TERMINAL.category, shortcutDisplay: CMD.CLEAR_TERMINAL.shortcut, action: () => this.clearActiveTerminal() },
+      { name: CMD.COPY_LAST_OUTPUT.name, desc: CMD.COPY_LAST_OUTPUT.desc, category: CMD.COPY_LAST_OUTPUT.category, action: () => { const output = this.panes[this.activeIndex]?.pane.shellIntegration.getLastCommandOutput(); if (output) navigator.clipboard.writeText(output); this.closePaletteIfOpen(); } },
       { name: CMD.CREATE_COMMAND.name, desc: CMD.CREATE_COMMAND.desc, category: CMD.CREATE_COMMAND.category, shortcutDisplay: CMD.CREATE_COMMAND.shortcut, action: () => { this.palette.hide(); const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || ''; this.wizard.show(input); } },
       ...this.themes.map(t => ({
         name: `Theme: ${t.name}`, desc: `Switch to ${t.name} theme`, category: 'Appearance',
@@ -1031,6 +1040,15 @@ class ElTerminalo {
   private handleKeydown(e: KeyboardEvent): void {
     const isMeta = e.metaKey;
 
+    // Smart render panel (check all panes)
+    for (const tab of this.tabs) {
+      for (const p of tab.panes) {
+        if (p.pane.smartRender.isPanelOpen()) {
+          if (p.pane.smartRender.handleKeydown(e)) return;
+        }
+      }
+    }
+
     // Status modal takes highest priority after wizards
     if (this.statusModal.isOpen()) {
       e.stopPropagation();
@@ -1109,6 +1127,16 @@ class ElTerminalo {
       if (e.shiftKey && e.key === '\\') {
         e.preventDefault();
         this.splitPane('vertical');
+        return;
+      }
+      if (e.shiftKey && e.key === 'ArrowUp') {
+        e.preventDefault();
+        this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('prev');
+        return;
+      }
+      if (e.shiftKey && e.key === 'ArrowDown') {
+        e.preventDefault();
+        this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('next');
         return;
       }
 
