@@ -12,7 +12,6 @@ env:
   CGO_LDFLAGS: '-framework Accelerate -framework Foundation -framework Metal -framework MetalKit -framework MetalPerformanceShaders'
 
 jobs:
-  # Setup shared deps for Go jobs (clone + build llama.cpp)
   setup-llm:
     runs-on: macos-latest
     steps:
@@ -47,10 +46,13 @@ jobs:
         with:
           name: llm-deps
           path: deps/go-llama.cpp
+      - name: Stub frontend dist for go:embed
+        run: mkdir -p frontend/dist && touch frontend/dist/index.html
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
+          install-mode: goinstall
 
   build-go:
     needs: setup-llm
@@ -64,6 +66,8 @@ jobs:
         with:
           name: llm-deps
           path: deps/go-llama.cpp
+      - name: Stub frontend dist for go:embed
+        run: mkdir -p frontend/dist && touch frontend/dist/index.html
       - run: go vet ./...
 
   test-go:
@@ -78,6 +82,8 @@ jobs:
         with:
           name: llm-deps
           path: deps/go-llama.cpp
+      - name: Stub frontend dist for go:embed
+        run: mkdir -p frontend/dist && touch frontend/dist/index.html
       - run: go test ./...
 
   lint-frontend:
