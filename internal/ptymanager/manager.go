@@ -31,18 +31,20 @@ type SessionStatus struct {
 
 // Manager manages multiple PTY sessions and streams output via Wails events.
 type Manager struct {
-	ctx      context.Context
-	shell    string
-	sessions map[string]*Session
-	mu       sync.Mutex
-	wg       sync.WaitGroup
+	ctx       context.Context
+	shell     string
+	configDir string
+	sessions  map[string]*Session
+	mu        sync.Mutex
+	wg        sync.WaitGroup
 }
 
 // NewManager creates a new PTY manager.
-func NewManager(shell string) *Manager {
+func NewManager(shell, configDir string) *Manager {
 	return &Manager{
-		shell:    shell,
-		sessions: make(map[string]*Session),
+		shell:     shell,
+		configDir: configDir,
+		sessions:  make(map[string]*Session),
 	}
 }
 
@@ -53,7 +55,7 @@ func (m *Manager) SetContext(ctx context.Context) {
 
 // CreateSession spawns a new PTY and starts streaming output.
 func (m *Manager) CreateSession(cols, rows int, cwd string) (string, error) {
-	session, err := NewSession(m.shell, cols, rows, cwd)
+	session, err := NewSession(m.shell, m.configDir, cols, rows, cwd)
 	if err != nil {
 		return "", err
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/albinanto/elterminalo/internal/config"
 	"github.com/albinanto/elterminalo/internal/llm"
 	"github.com/albinanto/elterminalo/internal/ptymanager"
+	"github.com/albinanto/elterminalo/internal/shellintegration"
 	"github.com/albinanto/elterminalo/internal/theme"
 	"github.com/albinanto/elterminalo/internal/updater"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -47,7 +48,7 @@ func NewApp(shell string, cfg *config.Config) *App {
 	}
 	return &App{
 		shell:   shell,
-		ptyMgr:  ptymanager.NewManager(shell),
+		ptyMgr:  ptymanager.NewManager(shell, cfg.Dir()),
 		cfg:     cfg,
 		cmds:    commands.NewStore(cfg.Dir()),
 		dropDir: dropDir,
@@ -60,6 +61,9 @@ func (a *App) startup(ctx context.Context) {
 
 	// Clean up any stale backup from a prior update
 	updater.CleanupStaleBackup()
+
+	// Install shell integration scripts (zsh/bash hooks for OSC 133)
+	shellintegration.Install(a.cfg.Dir())
 
 	// Clean up partial downloads and old model versions
 	llm.CleanStaleFiles(a.cfg.Dir())

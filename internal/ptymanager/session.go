@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/creack/pty"
@@ -24,7 +26,8 @@ type Session struct {
 }
 
 // NewSession spawns a shell in a new PTY. If cwd is empty, defaults to home.
-func NewSession(shell string, cols, rows int, cwd string) (*Session, error) {
+// configDir is used to locate shell integration scripts.
+func NewSession(shell, configDir string, cols, rows int, cwd string) (*Session, error) {
 	if cols < 1 {
 		cols = defaultCols
 	}
@@ -43,13 +46,36 @@ func NewSession(shell string, cols, rows int, cwd string) (*Session, error) {
 
 	cmd := exec.Command(shell, "-l")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+
+	shellIntegrationDir := filepath.Join(configDir, "shell")
+	env := append(os.Environ(),
 		"TERM=xterm-256color",
 		"TERM_PROGRAM=ElTerminalo",
 		"PROMPT_EOL_MARK=",
 		fmt.Sprintf("COLUMNS=%d", cols),
 		fmt.Sprintf("LINES=%d", rows),
+		"ELTERMINALO_SHELL_INTEGRATION_DIR="+shellIntegrationDir,
 	)
+
+	// Shell-specific integration injection
+	shellName := filepath.Base(shell)
+	switch {
+	case strings.Contains(shellName, "zsh"):
+		// ZDOTDIR trick: point zsh to our bootstrap .zshenv which sources
+		// the user's real config and then loads shell integration.
+		origZdotdir := os.Getenv("ZDOTDIR")
+		env = append(env,
+			"ZDOTDIR="+filepath.Join(shellIntegrationDir, "zdotdir"),
+			"ELTERMINALO_ORIG_ZDOTDIR="+origZdotdir,
+		)
+	case strings.Contains(shellName, "bash"):
+		// Bootstrap via PROMPT_COMMAND: sources integration on first prompt,
+		// then restores any original PROMPT_COMMAND.
+		script := filepath.Join(shellIntegrationDir, "elterminalo-integration-bash.sh")
+		env = append(env, "PROMPT_COMMAND=source "+script)
+	}
+
+	cmd.Env = env
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: uint16(cols),
