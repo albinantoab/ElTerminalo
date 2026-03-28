@@ -1356,6 +1356,240 @@ html, body {
   font-weight: 600;
 }
 
+/* Smart output rendering — per-command badges + panel */
+
+.smart-badge {
+  position: fixed;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.6;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.smart-badge:hover {
+  opacity: 1;
+  background: var(--border);
+  color: var(--fg);
+}
+
+.smart-badge-active {
+  opacity: 1;
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.smart-badge-active:hover {
+  background: var(--accent-dim);
+  color: #fff;
+}
+
+.smart-badge-active .smart-badge-dot,
+.smart-badge-active .smart-badge-dot-error {
+  background: #fff;
+}
+
+.smart-badge-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.smart-badge-dot-error {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #f85149;
+}
+
+.smart-panel {
+  position: fixed;
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  background: var(--status-bg);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  max-height: 50%;
+}
+
+.smart-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.smart-panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.smart-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.smart-panel-action {
+  cursor: pointer;
+  color: #6b7280;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.smart-panel-action:hover {
+  color: var(--fg);
+  background: var(--border);
+}
+
+.smart-panel-close {
+  cursor: pointer;
+  color: #6b7280;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.smart-panel-close:hover {
+  color: var(--fg);
+  background: var(--border);
+}
+
+.smart-panel-content {
+  overflow-y: auto;
+  overflow-x: auto;
+  flex: 1;
+}
+
+.smart-panel-content::-webkit-scrollbar {
+  display: block;
+  width: 4px;
+}
+
+.smart-panel-content::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 2px;
+}
+
+/* JSON */
+.smart-json { padding: 4px 8px; }
+.smart-json-body { padding-left: 16px; }
+.smart-json-entry { line-height: 1.5; }
+.smart-json-key { color: var(--accent); }
+.smart-json-index { color: #6b7280; font-size: 10px; }
+.smart-json-string { color: #a3e635; }
+.smart-json-number { color: #22d3ee; }
+.smart-json-boolean { color: #facc15; }
+.smart-json-null { color: #6b7280; font-style: italic; }
+.smart-json-toggle { cursor: pointer; margin-right: 4px; opacity: 0.5; user-select: none; font-size: 10px; }
+.smart-json-toggle:hover { opacity: 1; }
+.smart-json-summary { color: #6b7280; font-style: italic; font-size: 11px; }
+
+/* Table */
+.smart-table-grid { border-collapse: collapse; width: 100%; }
+.smart-table-grid th {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
+  color: var(--accent);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 11px;
+  position: sticky;
+  top: 0;
+  background: var(--status-bg);
+  z-index: 1;
+}
+.smart-table-grid th:hover { color: var(--fg); }
+.smart-table-grid td {
+  padding: 2px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
+  white-space: nowrap;
+  font-size: 12px;
+}
+.smart-table-grid tbody tr:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.smart-table-more {
+  text-align: center;
+  padding: 4px;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+}
+.smart-table-more:hover { text-decoration: underline; }
+
+/* Error */
+.smart-error-header {
+  padding: 4px 8px;
+  font-weight: 600;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.smart-error-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f85149;
+  display: inline-block;
+}
+.smart-error-output {
+  padding: 0 8px;
+  margin: 0;
+  font-family: inherit;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.4;
+}
+.smart-error-line {
+  background: color-mix(in srgb, #f85149 12%, transparent);
+  border-left: 2px solid #f85149;
+  padding-left: 6px;
+  margin-left: -8px;
+  padding-right: 8px;
+}
+.smart-error-normal { padding-left: 8px; }
+
+/* Shell integration — last command exit code in status bar */
+.status-exit-ok {
+  color: #56d364;
+  font-size: 11px;
+}
+
+.status-exit-fail {
+  color: #f85149;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* Terminal context menu */
 .term-ctx-menu {
   position: fixed;

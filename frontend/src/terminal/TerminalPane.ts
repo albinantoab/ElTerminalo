@@ -5,6 +5,8 @@ import '@xterm/xterm/css/xterm.css';
 import '../types/wails.d.ts';
 import { utf8ToBase64 } from '../utils';
 import { CMD } from '../constants';
+import { ShellIntegration } from './ShellIntegration';
+import { SmartRenderManager } from './smartrender/SmartRenderManager';
 
 export interface XtermTheme {
   background: string;
@@ -47,6 +49,8 @@ export class TerminalPane {
   private lastCols: number = 0;
   private lastRows: number = 0;
   private ctxActions: TerminalContextActions | null = null;
+  public shellIntegration: ShellIntegration;
+  public smartRender: SmartRenderManager;
 
   constructor(container: HTMLElement, theme: XtermTheme) {
     this.container = container;
@@ -66,6 +70,10 @@ export class TerminalPane {
     this.terminal.loadAddon(this.fitAddon);
 
     this.terminal.open(container);
+
+    // Register OSC 133 handler for shell integration (command blocks)
+    this.shellIntegration = new ShellIntegration(this.terminal);
+    this.smartRender = new SmartRenderManager(this.terminal, container, this.shellIntegration);
 
     // Block Ctrl+L from reaching the shell — only Cmd+L should clear
     // Send CSI u sequence for Shift+Enter so apps like Claude CLI can
@@ -226,6 +234,14 @@ export class TerminalPane {
           enabled: true,
           action: () => this.terminal.clear(),
         },
+        {
+          type: 'action', label: CMD.COPY_LAST_OUTPUT.name,
+          enabled: this.shellIntegration.getLastCommandOutput() !== null,
+          action: () => {
+            const output = this.shellIntegration.getLastCommandOutput();
+            if (output) navigator.clipboard.writeText(output);
+          },
+        },
         { type: 'separator' },
         {
           type: 'action', label: CMD.SPLIT_VERTICAL.name, shortcut: CMD.SPLIT_VERTICAL.shortcut,
@@ -376,6 +392,8 @@ export class TerminalPane {
   }
 
   dispose(): void {
+    this.smartRender.dispose();
+    this.shellIntegration.dispose();
     if (this.sessionId) {
       window.go.main.App.CloseSession(this.sessionId);
     }
