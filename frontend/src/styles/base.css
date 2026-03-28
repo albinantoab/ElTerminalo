@@ -1,0 +1,85 @@
+/* Bundled MonaspiceNe Nerd Font Mono (Monaspace Neon + Nerd Font glyphs) */
+@font-face {
+  font-family: 'MonaspiceNe NFM';
+  src: url('../fonts/MonaspiceNeNerdFontMono-Light.woff2') format('woff2');
+  font-weight: 300;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'MonaspiceNe NFM';
+  src: url('../fonts/MonaspiceNeNerdFontMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'MonaspiceNe NFM';
+  src: url('../fonts/MonaspiceNeNerdFontMono-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'MonaspiceNe NFM';
+  src: url('../fonts/MonaspiceNeNerdFontMono-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'MonaspiceNe NFM';
+  src: url('../fonts/MonaspiceNeNerdFontMono-Italic.woff2') format('woff2');
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: 'MonaspiceNe NFM';
+  src: url('../fonts/MonaspiceNeNerdFontMono-BoldItalic.woff2') format('woff2');
+  font-weight: 700;
+  font-style: italic;
+  font-display: block;
+}
+
+:root {
+  --bg: #0a0a12;
+  --fg: #e0e0e8;
+  --accent: #5e17eb;
+  --accent-dim: #4311b0;
+  --border: #1a1a2e;
+  --border-active: #5e17eb;
+  --status-bg: #06060c;
+  --status-fg: #5e17eb;
+  --cursor-color: #5e17eb;
+  --selection-bg: #2a1a4e;
+  --titlebar-height: 28px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'MonaspiceNe NFM', 'SF Mono', 'Menlo', monospace;
+  font-size: 13px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+

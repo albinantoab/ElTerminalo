@@ -1,0 +1,146 @@
+/* Status bar */
+#statusbar {
+  height: 28px;
+  background: var(--status-bg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  font-size: 12px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+.status-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--border);
+  font-size: 11px;
+}
+
+.status-key {
+  color: color-mix(in srgb, var(--accent) 80%, #9ca3af);
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: 3px;
+}
+
+.status-label {
+  color: #6b7280;
+  margin-right: 2px;
+}
+
+.status-sep {
+  color: #4b5563;
+  margin: 0 6px;
+}
+
+.status-badge {
+  background: var(--accent);
+  color: var(--bg);
+  padding: 2px 10px;
+  border-radius: 3px;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.status-dots {
+  display: flex;
+  gap: 4px;
+  color: var(--accent-dim);
+}
+
+.status-ai-generating {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+  animation: statusPulse 1.5s ease-in-out infinite;
+}
+
+.status-update {
+  color: #56d364;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: rgba(86, 211, 100, 0.1);
+  transition: background 0.15s;
+}
+
+.status-update:hover {
+  background: rgba(86, 211, 100, 0.2);
+}
+
+/* Update dialog */
+.update-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+}
+
+.update-dialog {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 24px;
+  width: 360px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.update-dialog-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #56d364;
+}
+
+.update-dialog-body {
+  font-size: 13px;
+  color: #9ca3af;
+  line-height: 1.6;
+}
+
+.update-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Model download progress bar (inside update-dialog) */
+.model-dl-bar-track {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 12px;
+}
+
+.model-dl-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #5e17eb, #e94560);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.status-dot-active {
+  color: var(--accent);
+}
+
