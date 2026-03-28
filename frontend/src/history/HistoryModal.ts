@@ -63,16 +63,14 @@ export class HistoryModal {
     if (e.key === 'ArrowUp') {
       e.preventDefault();
       this.cursor = Math.max(0, this.cursor - 1);
-      this.render();
-      (this.overlay.querySelector('.history-input') as HTMLInputElement)?.focus();
+      this.updateCursor();
       return true;
     }
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       this.cursor = Math.min(all.length - 1, this.cursor + 1);
-      this.render();
-      (this.overlay.querySelector('.history-input') as HTMLInputElement)?.focus();
+      this.updateCursor();
       return true;
     }
 
@@ -104,6 +102,14 @@ export class HistoryModal {
 
   private getAllEntries(): HistoryEntry[] {
     return [...this.cwdEntries, ...this.globalEntries];
+  }
+
+  private updateCursor(): void {
+    const rows = this.overlay.querySelectorAll('.history-row');
+    rows.forEach((row, i) => {
+      row.classList.toggle('selected', i === this.cursor);
+    });
+    this.overlay.querySelector('.history-row.selected')?.scrollIntoView({ block: 'nearest' });
   }
 
   private render(): void {

@@ -61,15 +61,13 @@ export class CommandPalette {
     if (e.key === 'ArrowUp') {
       e.preventDefault();
       this.cursor = Math.max(0, this.cursor - 1);
-      this.render();
-      (this.overlay.querySelector('.palette-input') as HTMLInputElement)?.focus();
+      this.updateCursor();
       return true;
     }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       this.cursor = Math.min(this.getFilteredCommands().length - 1, this.cursor + 1);
-      this.render();
-      (this.overlay.querySelector('.palette-input') as HTMLInputElement)?.focus();
+      this.updateCursor();
       return true;
     }
     if (e.key === 'Enter') {
@@ -137,6 +135,15 @@ export class CommandPalette {
       c.desc.toLowerCase().includes(q) ||
       c.category.toLowerCase().includes(q)
     );
+  }
+
+  private updateCursor(): void {
+    const items = this.overlay.querySelectorAll('.palette-item[data-index]');
+    items.forEach((item) => {
+      const idx = parseInt(item.getAttribute('data-index') || '0');
+      item.classList.toggle('selected', idx === this.cursor);
+    });
+    this.overlay.querySelector('.palette-item.selected')?.scrollIntoView({ block: 'nearest' });
   }
 
   private render(): void {

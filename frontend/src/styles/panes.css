@@ -35,7 +35,7 @@
   inset: -1px;
   pointer-events: none;
   z-index: 2;
-  --cb-color: var(--border-active);
+  --cb-color: #9ca3af;
   --cb-size: 6px;
   --cb-width: 2px;
   background:

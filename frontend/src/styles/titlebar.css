@@ -64,7 +64,6 @@
   background: var(--bg);
   color: var(--fg);
   border-color: #3a3a4e;
-  border-left: 2px solid var(--accent);
   position: relative;
 }
 

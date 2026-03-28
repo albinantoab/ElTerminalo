@@ -69,13 +69,13 @@ export class StatusModal {
     if (e.key === 'ArrowUp') {
       e.preventDefault();
       this.cursor = Math.max(0, this.cursor - 1);
-      this.render();
+      this.updateCursor();
       return true;
     }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       this.cursor = Math.min(this.entries.length - 1, this.cursor + 1);
-      this.render();
+      this.updateCursor();
       return true;
     }
     if (e.key === 'Enter') {
@@ -138,6 +138,14 @@ export class StatusModal {
     }
   }
 
+  private updateCursor(): void {
+    const rows = this.overlay.querySelectorAll('.status-modal-row');
+    rows.forEach((row, i) => {
+      row.classList.toggle('selected', i === this.cursor);
+    });
+    this.overlay.querySelector('.status-modal-row.selected')?.scrollIntoView({ block: 'nearest' });
+  }
+
   private render(): void {
     try {
       let lastTabIndex = -1;
@@ -172,14 +180,19 @@ export class StatusModal {
         ? '<div class="status-modal-empty">No active sessions</div>'
         : '';
 
-      this.overlay.innerHTML = `<div class="status-modal-box">
-        <div class="status-modal-header">
-          <span class="status-modal-title">Session Status</span>
-          <span class="status-modal-refresh">auto-refreshing</span>
-        </div>
-        <div class="status-modal-list">${rows || empty}</div>
-        <div class="status-modal-footer"><kbd>↑↓</kbd> navigate · <kbd>Enter</kbd> jump · <kbd>Esc</kbd> close</div>
-      </div>`;
+      const existingList = this.overlay.querySelector('.status-modal-list');
+      if (existingList) {
+        existingList.innerHTML = rows || empty;
+      } else {
+        this.overlay.innerHTML = `<div class="status-modal-box">
+          <div class="status-modal-header">
+            <span class="status-modal-title">Session Status</span>
+            <span class="status-modal-refresh">auto-refreshing</span>
+          </div>
+          <div class="status-modal-list">${rows || empty}</div>
+          <div class="status-modal-footer"><kbd>↑↓</kbd> navigate · <kbd>Enter</kbd> jump · <kbd>Esc</kbd> close</div>
+        </div>`;
+      }
 
       this.overlay.querySelector('.status-modal-row.selected')?.scrollIntoView({ block: 'nearest' });
 
