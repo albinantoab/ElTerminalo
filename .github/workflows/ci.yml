@@ -6,35 +6,78 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  GO_VERSION: '1.25'
+  NODE_VERSION: '20'
+  CGO_LDFLAGS: '-framework Accelerate -framework Foundation -framework Metal -framework MetalKit -framework MetalPerformanceShaders'
+
 jobs:
-  lint-go:
-    runs-on: ubuntu-latest
+  # Setup shared deps for Go jobs (clone + build llama.cpp)
+  setup-llm:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: ${{ env.GO_VERSION }}
+      - name: Cache llama.cpp build
+        id: cache-llm
+        uses: actions/cache@v4
+        with:
+          path: deps/go-llama.cpp
+          key: llm-${{ runner.os }}-${{ hashFiles('go.mod') }}
+      - name: Build llama.cpp
+        if: steps.cache-llm.outputs.cache-hit != 'true'
+        run: make setup-llm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llm-deps
+          path: deps/go-llama.cpp
+          retention-days: 1
+
+  lint-go:
+    needs: setup-llm
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: llm-deps
+          path: deps/go-llama.cpp
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
 
   build-go:
-    runs-on: ubuntu-latest
+    needs: setup-llm
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: llm-deps
+          path: deps/go-llama.cpp
       - run: go vet ./...
 
   test-go:
-    runs-on: ubuntu-latest
+    needs: setup-llm
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: llm-deps
+          path: deps/go-llama.cpp
       - run: go test ./...
 
   lint-frontend:
@@ -43,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
       - working-directory: frontend
         run: npm ci
       - working-directory: frontend
@@ -55,7 +98,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
       - working-directory: frontend
         run: npm ci
       - working-directory: frontend
