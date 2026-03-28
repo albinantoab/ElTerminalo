@@ -43,6 +43,11 @@ __elterminalo_bootstrap() {
   precmd_functions+=(__elterminalo_precmd)
   preexec_functions+=(__elterminalo_preexec)
 
+  # Load built-in prompt AFTER .zshrc has finished
+  # (skips if starship/p10k/oh-my-zsh is active)
+  local __elt_prompt="${ELTERMINALO_SHELL_INTEGRATION_DIR}/elterminalo-prompt-zsh.sh"
+  [[ -f "$__elt_prompt" ]] && source "$__elt_prompt"
+
   # Run precmd immediately for this first prompt
   __elterminalo_precmd
 }

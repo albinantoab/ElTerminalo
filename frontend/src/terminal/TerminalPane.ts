@@ -309,6 +309,10 @@ export class TerminalPane {
     this.ctxActions = actions;
   }
 
+  clear(): void {
+    this.terminal.clear();
+  }
+
   /** Return the text on the current cursor line(s), stripped of the shell prompt.
    *  Handles soft-wrapped lines and shell continuation lines (ending with \). */
   getCurrentInput(): string {

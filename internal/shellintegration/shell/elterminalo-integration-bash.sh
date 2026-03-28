@@ -67,3 +67,8 @@ __elterminalo_arm_debug() {
 
 # Arm the debug trap at the end of each prompt cycle
 PROMPT_COMMAND='__elterminalo_prompt_command; __elterminalo_arm_debug'
+
+# Load built-in prompt (skips if starship detected)
+__elterminalo_prompt="${ELTERMINALO_SHELL_INTEGRATION_DIR}/elterminalo-prompt-bash.sh"
+[[ -f "$__elterminalo_prompt" ]] && source "$__elterminalo_prompt"
+unset __elterminalo_prompt

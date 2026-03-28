@@ -9,7 +9,7 @@
   display: flex;
   justify-content: center;
   padding-top: 80px;
-  z-index: 300;
+  z-index: 1000;
 }
 
 #wizard-overlay.hidden {

@@ -35,6 +35,7 @@ class ElTerminalo {
   private askAI!: AskAI;
   private historyModal!: HistoryModal;
   private aiGenerating = false;
+  private aiPrompts = new Set<string>();
   private modelUpdateAvailable = false;
 
   private stateSaveInterval: ReturnType<typeof setInterval> | null = null;
@@ -543,9 +544,14 @@ class ElTerminalo {
     // Record commands in history database
     pane.shellIntegration.onCommandFinishedAdd(async (block, exitCode) => {
       if (!block.commandText || !pane.sessionId) return;
+      const cmd = block.commandText.trim();
+      if (this.aiPrompts.has(cmd)) {
+        this.aiPrompts.delete(cmd);
+        return;
+      }
       try {
         const cwd = await pane.getCWD();
-        await window.go.main.App.RecordCommand(block.commandText, cwd, exitCode, pane.sessionId);
+        await window.go.main.App.RecordCommand(cmd, cwd, exitCode, pane.sessionId);
       } catch { /* best-effort */ }
     });
 
@@ -939,7 +945,10 @@ class ElTerminalo {
 
   private clearActiveTerminal(): void {
     const ap = this.panes[this.activeIndex];
-    if (ap) window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('\x0c'));
+    if (!ap) return;
+    ap.pane.clear();
+    // Send Ctrl+L to the shell so it redraws the full prompt
+    window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('\x0c'));
   }
 
   // --- AI Command (Cmd+K) ---
@@ -962,12 +971,18 @@ class ElTerminalo {
     const query = ap.pane.getCurrentInput();
     if (!query.trim()) return;
 
+    // Track immediately before any async work so the recording callback can filter it
+    this.aiPrompts.add(query.trim());
+
     // Check model, trigger download dialog if needed
     const ready = await window.go.main.App.IsModelReady();
     if (!ready) {
       await this.handleModelDownload();
       // Recheck after dialog closes
-      if (!(await window.go.main.App.IsModelReady())) return;
+      if (!(await window.go.main.App.IsModelReady())) {
+        this.aiPrompts.delete(query.trim());
+        return;
+      }
     }
 
     // Show generating state — rotating border + status bar
@@ -985,8 +1000,8 @@ class ElTerminalo {
         window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(command));
       }
     } catch (err) {
-      // Restore the original query on failure
-      window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(query));
+      // Write a comment so the user sees what happened without accidentally executing the prompt
+      window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(`# AI failed: ${query}`));
       console.error('AI generation failed:', err);
     }
 

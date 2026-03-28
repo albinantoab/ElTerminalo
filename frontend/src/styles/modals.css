@@ -6,7 +6,7 @@
   display: flex;
   justify-content: center;
   padding-top: 80px;
-  z-index: 250;
+  z-index: 1000;
 }
 
 #status-overlay.hidden {
@@ -201,7 +201,7 @@
   display: flex;
   justify-content: center;
   padding-top: 80px;
-  z-index: 250;
+  z-index: 1000;
 }
 
 #ai-overlay.hidden {

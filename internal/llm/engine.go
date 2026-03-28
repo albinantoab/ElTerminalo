@@ -19,7 +19,7 @@ type Engine struct {
 // NewEngine loads the GGUF model into memory and returns an inference engine.
 func NewEngine(modelPath, shell string) (*Engine, error) {
 	model, err := llama.New(modelPath,
-		llama.SetContext(512),
+		llama.SetContext(2048),
 		llama.SetGPULayers(99), // Offload all layers to GPU (Metal on macOS)
 	)
 	if err != nil {
