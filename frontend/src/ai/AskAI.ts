@@ -91,6 +91,7 @@ export class AskAI {
   }
 
   private render(): void {
+    try {
     const errorHtml = this.error
       ? `<div class="ai-error">${escHtml(this.error)}</div>`
       : '';
@@ -121,6 +122,10 @@ export class AskAI {
     const input = this.overlay.querySelector('.ai-input') as HTMLInputElement;
     if (input && !this.loading) {
       input.addEventListener('keydown', (e) => e.stopPropagation());
+    }
+    } catch (e) {
+      console.error('AskAI render error:', e);
+      this.overlay.innerHTML = '<div class="ai-box"><div class="ai-title">Something went wrong</div></div>';
     }
   }
 }

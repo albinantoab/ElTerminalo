@@ -175,6 +175,7 @@ export class CommandWizard {
   }
 
   private render(): void {
+    try {
     let content = '';
     if (this.step === 0) {
       const scopes = [
@@ -218,6 +219,10 @@ export class CommandWizard {
         input.selectionStart = input.selectionEnd = input.value.length;
       }
     });
+    } catch (e) {
+      console.error('CommandWizard render error:', e);
+      this.overlay.innerHTML = '<div class="wizard-box"><div class="wizard-title">Something went wrong</div></div>';
+    }
   }
 
   private async finish(): Promise<void> {

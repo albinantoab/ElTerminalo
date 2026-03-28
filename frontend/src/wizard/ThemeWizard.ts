@@ -52,6 +52,7 @@ export class ThemeWizard {
   }
 
   private render(prefill?: Record<string, string>): void {
+    try {
     const title = this.editingName ? `Edit Theme — ${escHtml(this.editingName)}` : 'Create Theme';
     const v = (field: string) => prefill ? (prefill[field] || '') : '';
 
@@ -143,6 +144,10 @@ export class ThemeWizard {
         nameInput.select();
       }
     });
+    } catch (e) {
+      console.error('ThemeWizard render error:', e);
+      this.overlay.innerHTML = '<div class="theme-wizard-box"><div class="wizard-title">Something went wrong</div></div>';
+    }
   }
 
   private async save(): Promise<void> {

@@ -285,10 +285,11 @@ class ElTerminalo {
         } else {
           if (status) status.textContent = 'Download failed — use Cmd+K to retry later';
         }
+      } finally {
+        unsub();
+        document.removeEventListener('keydown', onKey, true);
       }
 
-      unsub();
-      document.removeEventListener('keydown', onKey, true);
     } catch (e) {
       console.error('Model check failed:', e);
     }
