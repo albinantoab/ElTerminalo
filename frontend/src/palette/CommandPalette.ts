@@ -20,6 +20,7 @@ export class CommandPalette {
   private cursor = 0;
   private overlay: HTMLElement;
   private callbacks: PaletteCallbacks;
+  private delegationAttached = false;
 
   constructor(overlay: HTMLElement, callbacks: PaletteCallbacks) {
     this.overlay = overlay;
@@ -139,37 +140,59 @@ export class CommandPalette {
   }
 
   private render(): void {
-    const commands = this.getFilteredCommands();
-    let lastCategory = '';
-    const items = commands.map((c, i) => {
-      const shortcutBadge = c.shortcutDisplay ? `<kbd class="palette-item-shortcut">${escHtml(c.shortcutDisplay)}</kbd>` : '';
-      let groupHeader = '';
-      if (c.category !== lastCategory) {
-        lastCategory = c.category;
-        groupHeader = `<div class="palette-group-header">${escHtml(c.category)}</div>`;
+    try {
+      const commands = this.getFilteredCommands();
+      let lastCategory = '';
+      const items = commands.map((c, i) => {
+        const shortcutBadge = c.shortcutDisplay ? `<kbd class="palette-item-shortcut">${escHtml(c.shortcutDisplay)}</kbd>` : '';
+        let groupHeader = '';
+        if (c.category !== lastCategory) {
+          lastCategory = c.category;
+          groupHeader = `<div class="palette-group-header">${escHtml(c.category)}</div>`;
+        }
+        return `${groupHeader}<div class="palette-item ${i === this.cursor ? 'selected' : ''}" data-index="${i}"><div class="palette-item-text"><span class="palette-item-name">${escHtml(c.name)}</span><span class="palette-item-desc">${escHtml(c.desc)}</span></div>${shortcutBadge}</div>`;
+      }).join('');
+
+      const listHtml = items || '<div class="palette-item"><span class="palette-item-desc">No matching commands</span></div>';
+
+      const existingBox = this.overlay.querySelector('.palette-box');
+      if (existingBox) {
+        const list = this.overlay.querySelector('.palette-list');
+        if (list) list.innerHTML = listHtml;
+        const input = this.overlay.querySelector('.palette-input') as HTMLInputElement;
+        if (input && input.value !== this.query) input.value = this.query;
+      } else {
+        this.overlay.innerHTML = `<div class="palette-box"><input class="palette-input" type="text" placeholder="Type a command..." value="${escHtml(this.query)}" /><div class="palette-list">${listHtml}</div><div class="palette-hint"><kbd>ENTER</kbd> execute · <kbd>${escHtml(CMD.FILL.shortcut)}</kbd> fill · <kbd>${escHtml(CMD.EDIT_COMMAND.shortcut)}</kbd> edit · <kbd>${escHtml(CMD.DELETE_COMMAND.shortcut)}</kbd> delete · <kbd>ESC</kbd> close</div></div>`;
+
+        const input = this.overlay.querySelector('.palette-input') as HTMLInputElement;
+        input.oninput = (e) => {
+          this.query = (e.target as HTMLInputElement).value;
+          this.cursor = 0;
+          this.render();
+          const ni = this.overlay.querySelector('.palette-input') as HTMLInputElement;
+          ni?.focus();
+          ni.selectionStart = ni.selectionEnd = ni.value.length;
+        };
       }
-      return `${groupHeader}<div class="palette-item ${i === this.cursor ? 'selected' : ''}" data-index="${i}"><div class="palette-item-text"><span class="palette-item-name">${escHtml(c.name)}</span><span class="palette-item-desc">${escHtml(c.desc)}</span></div>${shortcutBadge}</div>`;
-    }).join('');
 
-    this.overlay.innerHTML = `<div class="palette-box"><input class="palette-input" type="text" placeholder="Type a command..." value="${this.query}" /><div class="palette-list">${items || '<div class="palette-item"><span class="palette-item-desc">No matching commands</span></div>'}</div><div class="palette-hint"><kbd>ENTER</kbd> execute · <kbd>${CMD.FILL.shortcut}</kbd> fill · <kbd>${CMD.EDIT_COMMAND.shortcut}</kbd> edit · <kbd>${CMD.DELETE_COMMAND.shortcut}</kbd> delete · <kbd>ESC</kbd> close</div></div>`;
+      if (!this.delegationAttached) {
+        this.delegationAttached = true;
+        this.overlay.addEventListener('click', (e) => {
+          const item = (e.target as HTMLElement).closest('.palette-item[data-index]');
+          if (item) {
+            const index = parseInt(item.getAttribute('data-index')!, 10);
+            const cmd = this.getFilteredCommands()[index];
+            this.hide();
+            cmd?.action(false);
+          }
+        });
+      }
 
-    const input = this.overlay.querySelector('.palette-input') as HTMLInputElement;
-    input.addEventListener('input', (e) => {
-      this.query = (e.target as HTMLInputElement).value;
-      this.cursor = 0;
-      this.render();
-      const ni = this.overlay.querySelector('.palette-input') as HTMLInputElement;
-      ni?.focus();
-      ni.selectionStart = ni.selectionEnd = ni.value.length;
-    });
-    this.overlay.querySelector('.palette-item.selected')?.scrollIntoView({ block: 'nearest' });
-    this.overlay.querySelectorAll('.palette-item[data-index]').forEach(el => {
-      el.addEventListener('click', () => {
-        const cmd = commands[parseInt(el.getAttribute('data-index') || '0')];
-        this.hide();
-        cmd?.action(false);
-      });
-    });
+      this.overlay.querySelector('.palette-item.selected')?.scrollIntoView({ block: 'nearest' });
+    } catch (e) {
+      console.error('Render error:', e);
+      this.overlay.innerHTML = '<div class="error">Something went wrong</div>';
+    }
   }
 
   private async deleteTheme(cmd: PaletteCommand): Promise<void> {

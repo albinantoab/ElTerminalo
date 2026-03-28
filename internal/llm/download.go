@@ -71,10 +71,13 @@ func CheckModelUpdate(configDir string) bool {
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Head(ModelURL)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
 
 	remote := remoteETag(resp)
 	if remote == "" {
@@ -121,7 +124,10 @@ func DownloadModel(ctx context.Context, configDir string, onProgress func(downlo
 	// If model exists, do a quick HEAD check — skip if ETag matches
 	if ModelExists(configDir) {
 		if stored, err := os.ReadFile(etagPath(configDir)); err == nil {
-			headReq, _ := http.NewRequestWithContext(ctx, "HEAD", ModelURL, nil)
+			headReq, err := http.NewRequestWithContext(ctx, "HEAD", ModelURL, nil)
+			if err != nil {
+				return fmt.Errorf("failed to create HEAD request: %w", err)
+			}
 			if headResp, err := httpClient.Do(headReq); err == nil {
 				defer headResp.Body.Close()
 				if remote := remoteETag(headResp); remote != "" && remote == strings.TrimSpace(string(stored)) {
@@ -197,7 +203,9 @@ func DownloadModel(ctx context.Context, configDir string, onProgress func(downlo
 
 	// Save the ETag for future update checks
 	if etag := remoteETag(resp); etag != "" {
-		os.WriteFile(etagPath(configDir), []byte(etag), 0644)
+		if err := os.WriteFile(etagPath(configDir), []byte(etag), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to save ETag: %v\n", err)
+		}
 	}
 
 	return nil

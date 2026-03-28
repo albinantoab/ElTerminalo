@@ -151,7 +151,15 @@ export class CommandWizard {
       e.preventDefault();
       const val = (document.getElementById('wizard-field') as HTMLInputElement)?.value.trim() || '';
       if (this.step === 2) {
-        if (!val) return true;
+        const namePattern = /^[a-zA-Z0-9_\- ]+$/;
+        if (!val || val.length > 64 || !namePattern.test(val)) {
+          const field = document.getElementById('wizard-field') as HTMLInputElement;
+          if (field) {
+            field.classList.add('input-error');
+            setTimeout(() => field.classList.remove('input-error'), 1500);
+          }
+          return true;
+        }
         this.data.name = val;
         this.step = 3;
         this.render();

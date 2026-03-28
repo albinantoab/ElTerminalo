@@ -39,6 +39,7 @@ type App struct {
 	llmMu          sync.Mutex
 	llmIdleTimer   *time.Timer
 	downloadCancel context.CancelFunc
+	downloadMu     sync.Mutex
 	historyStore   *history.Store
 }
 
@@ -120,9 +121,12 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 
 	// Stop idle timer and free LLM model
+	a.llmMu.Lock()
 	if a.llmIdleTimer != nil {
 		a.llmIdleTimer.Stop()
+		a.llmIdleTimer = nil
 	}
+	a.llmMu.Unlock()
 	a.unloadEngine()
 }
 
@@ -297,21 +301,32 @@ func (a *App) IsModelDownloaded() bool {
 // Also used to update the model when a new version is available.
 func (a *App) DownloadModel() error {
 	dlCtx, cancel := context.WithCancel(a.ctx)
+	a.downloadMu.Lock()
 	a.downloadCancel = cancel
-	defer func() { a.downloadCancel = nil }()
+	a.downloadMu.Unlock()
+	defer func() {
+		a.downloadMu.Lock()
+		a.downloadCancel = nil
+		a.downloadMu.Unlock()
+	}()
 
 	return llm.DownloadModel(dlCtx, a.cfg.Dir(), func(downloaded, total int64) {
-		wailsRuntime.EventsEmit(a.ctx, "model:download-progress", map[string]int64{
-			"downloaded": downloaded,
-			"total":      total,
-		})
+		if a.ctx != nil {
+			wailsRuntime.EventsEmit(a.ctx, "model:download-progress", map[string]int64{
+				"downloaded": downloaded,
+				"total":      total,
+			})
+		}
 	})
 }
 
 // SkipDownload cancels an in-progress model download.
 func (a *App) SkipDownload() {
-	if a.downloadCancel != nil {
-		a.downloadCancel()
+	a.downloadMu.Lock()
+	cancel := a.downloadCancel
+	a.downloadMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -355,6 +370,8 @@ func (a *App) unloadEngine() {
 
 // resetIdleTimer resets (or starts) the idle unload timer.
 func (a *App) resetIdleTimer() {
+	a.llmMu.Lock()
+	defer a.llmMu.Unlock()
 	if a.llmIdleTimer != nil {
 		a.llmIdleTimer.Stop()
 	}
@@ -435,6 +452,11 @@ func (a *App) SaveDroppedFile(fileName string, dataBase64 string) (string, error
 	}
 
 	dest := filepath.Join(a.dropDir, fileName)
+	absDrop, _ := filepath.Abs(a.dropDir)
+	absDest, _ := filepath.Abs(dest)
+	if !strings.HasPrefix(absDest, absDrop+string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid file name")
+	}
 	if err := os.WriteFile(dest, data, 0644); err != nil {
 		return "", fmt.Errorf("cannot write file: %w", err)
 	}

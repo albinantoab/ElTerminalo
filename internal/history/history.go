@@ -63,8 +63,23 @@ func NewStore(configDir string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// Prune removes old entries, keeping only the most recent maxEntries records.
+func (s *Store) Prune(maxEntries int) error {
+	if s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(
+		"DELETE FROM command_history WHERE id NOT IN (SELECT id FROM command_history ORDER BY timestamp DESC LIMIT ?)",
+		maxEntries,
+	)
+	return err
+}
+
 // Add records a command. Skips if identical to the most recent entry for the same CWD.
 func (s *Store) Add(command, cwd string, exitCode int, shell, sessionID string) error {
+	if s.db == nil {
+		return nil
+	}
 	if command == "" {
 		return nil
 	}
@@ -100,6 +115,10 @@ func (s *Store) Search(params SearchParams) (SearchResult, error) {
 
 	query := "%" + params.Query + "%"
 
+	if s.db == nil {
+		return result, nil
+	}
+
 	// CWD-contextual matches
 	rows, err := s.db.Query(
 		"SELECT id, command, cwd, exit_code, shell, timestamp, session_id FROM command_history WHERE cwd = ? AND command LIKE ? ORDER BY timestamp DESC LIMIT ?",
@@ -125,6 +144,9 @@ func (s *Store) Search(params SearchParams) (SearchResult, error) {
 
 // Clear removes all history entries.
 func (s *Store) Clear() error {
+	if s.db == nil {
+		return nil
+	}
 	_, err := s.db.Exec("DELETE FROM command_history")
 	return err
 }
@@ -139,15 +161,17 @@ func (s *Store) Close() error {
 
 func scanEntries(rows *sql.Rows) []Entry {
 	defer rows.Close()
-	var entries []Entry
+	entries := []Entry{}
 	for rows.Next() {
 		var e Entry
 		var sessionID sql.NullString
-		rows.Scan(&e.ID, &e.Command, &e.CWD, &e.ExitCode, &e.Shell, &e.Timestamp, &sessionID)
+		if err := rows.Scan(&e.ID, &e.Command, &e.CWD, &e.ExitCode, &e.Shell, &e.Timestamp, &sessionID); err != nil {
+			continue
+		}
 		e.SessionID = sessionID.String
 		entries = append(entries, e)
 	}
-	if entries == nil {
+	if err := rows.Err(); err != nil {
 		return []Entry{}
 	}
 	return entries

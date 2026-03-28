@@ -62,18 +62,18 @@ export function detect(output: string, exitCode: number | null): DetectionResult
   return { type: 'none' };
 }
 
+const MAX_JSON_LENGTH = 500_000;
+
 function tryParseJson(text: string): unknown | null {
   const t = text.trim();
-  // Direct parse
+  if (t.length > MAX_JSON_LENGTH) return null;
+  const first = t[0];
+  if (first !== '{' && first !== '[') return null;
   try { return JSON.parse(t); } catch { /* continue */ }
-  // Terminal wraps lines and may insert newlines inside string values.
-  // Fix: replace newlines that appear inside quoted strings with spaces.
-  // Strategy: find all strings, replace inner newlines
   try {
     const fixed = t.replace(/"([^"\\]|\\.)*"/g, match => match.replace(/\n/g, ' '));
     return JSON.parse(fixed);
   } catch { /* continue */ }
-  // Last resort: collapse all whitespace
   try {
     return JSON.parse(t.replace(/\s+/g, ' '));
   } catch { return null; }

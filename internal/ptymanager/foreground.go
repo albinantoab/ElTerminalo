@@ -4,6 +4,7 @@ package ptymanager
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -48,7 +49,7 @@ func processName(pid int) (string, error) {
 
 // processNameFromProc reads /proc/<pid>/comm (Linux).
 func processNameFromProc(pid int) (string, error) {
-	data, err := exec.Command("cat", fmt.Sprintf("/proc/%d/comm", pid)).Output()
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
 	if err != nil {
 		return "", err
 	}

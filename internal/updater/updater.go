@@ -88,6 +88,10 @@ func ApplyUpdate() error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to check releases: HTTP %d", resp.StatusCode)
+	}
+
 	var release ghRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return fmt.Errorf("failed to parse release: %w", err)

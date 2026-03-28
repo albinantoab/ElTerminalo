@@ -39,6 +39,7 @@ func cwdFromProc(pid int) (string, error) {
 }
 
 // cwdFromLsof determines the CWD via lsof (macOS/darwin).
+// The PID comes from s.cmd.Process.Pid, a trusted source (our own child process).
 func cwdFromLsof(pid int) (string, error) {
 	out, err := exec.Command("lsof", "-a", "-d", "cwd", "-p", fmt.Sprintf("%d", pid), "-Fn").Output()
 	if err != nil {

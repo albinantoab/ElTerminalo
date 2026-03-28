@@ -26,6 +26,7 @@ export class StatusModal {
   private callbacks: StatusModalCallbacks;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private entries: StatusEntry[] = [];
+  private delegationAttached = false;
 
   constructor(overlay: HTMLElement, callbacks: StatusModalCallbacks) {
     this.overlay = overlay;
@@ -33,6 +34,10 @@ export class StatusModal {
   }
 
   async show(): Promise<void> {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+    }
     this.open = true;
     this.cursor = 0;
     await this.fetchStatus();
@@ -121,71 +126,79 @@ export class StatusModal {
   }
 
   private shortenPath(cwd: string): string {
-    if (!cwd) return '';
-    const home = cwd.match(/^\/Users\/[^/]+/)?.[0] || cwd.match(/^\/home\/[^/]+/)?.[0];
-    if (home && cwd.startsWith(home)) {
-      return '~' + cwd.slice(home.length);
+    try {
+      if (!cwd || typeof cwd !== 'string') return '';
+      const home = cwd.match(/^\/Users\/[^/]+/)?.[0] || cwd.match(/^\/home\/[^/]+/)?.[0];
+      if (home && cwd.startsWith(home)) {
+        return '~' + cwd.slice(home.length);
+      }
+      return cwd;
+    } catch {
+      return cwd || '';
     }
-    return cwd;
   }
 
   private render(): void {
-    let lastTabIndex = -1;
-    let rowIndex = 0;
-    const rows = this.entries.map((e, i) => {
-      let groupHeader = '';
-      if (e.tabIndex !== lastTabIndex) {
-        lastTabIndex = e.tabIndex;
-        const activeTag = e.isActiveTab ? ' <span class="status-modal-active-tag">active</span>' : '';
-        groupHeader = `<div class="status-modal-group">${escHtml(e.tabName)}${activeTag}</div>`;
-      }
-
-      const selected = i === this.cursor ? ' selected' : '';
-      const indicator = e.isIdle
-        ? '<span class="status-modal-dot idle"></span>'
-        : '<span class="status-modal-dot running"></span>';
-
-      const cmdDisplay = e.isIdle
-        ? '<span class="status-modal-idle">idle</span>'
-        : `<span class="status-modal-cmd">${escHtml(e.command)}</span>`;
-
-      rowIndex++;
-      return `${groupHeader}<div class="status-modal-row${selected}" data-index="${i}">
-        <div class="status-modal-left">
-          ${indicator}
-          <span class="status-modal-pane">Pane ${escHtml(e.paneLabel)}</span>
-        </div>
-        <div class="status-modal-mid">${cmdDisplay}</div>
-        <div class="status-modal-right">${escHtml(e.cwd)}</div>
-      </div>`;
-    }).join('');
-
-    const empty = this.entries.length === 0
-      ? '<div class="status-modal-empty">No active sessions</div>'
-      : '';
-
-    this.overlay.innerHTML = `<div class="status-modal-box">
-      <div class="status-modal-header">
-        <span class="status-modal-title">Session Status</span>
-        <span class="status-modal-refresh">auto-refreshing</span>
-      </div>
-      <div class="status-modal-list">${rows || empty}</div>
-      <div class="status-modal-footer"><kbd>↑↓</kbd> navigate · <kbd>Enter</kbd> jump · <kbd>Esc</kbd> close</div>
-    </div>`;
-
-    // Scroll selected row into view
-    this.overlay.querySelector('.status-modal-row.selected')?.scrollIntoView({ block: 'nearest' });
-
-    // Wire click-to-jump
-    this.overlay.querySelectorAll('.status-modal-row[data-index]').forEach(el => {
-      el.addEventListener('click', () => {
-        const idx = parseInt(el.getAttribute('data-index') || '0');
-        const entry = this.entries[idx];
-        if (entry) {
-          this.hide();
-          this.callbacks.switchToPane(entry.tabIndex, entry.paneIndex);
+    try {
+      let lastTabIndex = -1;
+      const rows = this.entries.map((e, i) => {
+        let groupHeader = '';
+        if (e.tabIndex !== lastTabIndex) {
+          lastTabIndex = e.tabIndex;
+          const activeTag = e.isActiveTab ? ' <span class="status-modal-active-tag">active</span>' : '';
+          groupHeader = `<div class="status-modal-group">${escHtml(e.tabName)}${activeTag}</div>`;
         }
-      });
-    });
+
+        const selected = i === this.cursor ? ' selected' : '';
+        const indicator = e.isIdle
+          ? '<span class="status-modal-dot idle"></span>'
+          : '<span class="status-modal-dot running"></span>';
+
+        const cmdDisplay = e.isIdle
+          ? '<span class="status-modal-idle">idle</span>'
+          : `<span class="status-modal-cmd">${escHtml(e.command)}</span>`;
+
+        return `${groupHeader}<div class="status-modal-row${selected}" data-index="${i}">
+          <div class="status-modal-left">
+            ${indicator}
+            <span class="status-modal-pane">Pane ${escHtml(e.paneLabel)}</span>
+          </div>
+          <div class="status-modal-mid">${cmdDisplay}</div>
+          <div class="status-modal-right">${escHtml(e.cwd)}</div>
+        </div>`;
+      }).join('');
+
+      const empty = this.entries.length === 0
+        ? '<div class="status-modal-empty">No active sessions</div>'
+        : '';
+
+      this.overlay.innerHTML = `<div class="status-modal-box">
+        <div class="status-modal-header">
+          <span class="status-modal-title">Session Status</span>
+          <span class="status-modal-refresh">auto-refreshing</span>
+        </div>
+        <div class="status-modal-list">${rows || empty}</div>
+        <div class="status-modal-footer"><kbd>↑↓</kbd> navigate · <kbd>Enter</kbd> jump · <kbd>Esc</kbd> close</div>
+      </div>`;
+
+      this.overlay.querySelector('.status-modal-row.selected')?.scrollIntoView({ block: 'nearest' });
+
+      if (!this.delegationAttached) {
+        this.delegationAttached = true;
+        this.overlay.addEventListener('click', (e) => {
+          const row = (e.target as HTMLElement).closest('.status-modal-row[data-index]');
+          if (!row) return;
+          const idx = parseInt(row.getAttribute('data-index') || '0');
+          const entry = this.entries[idx];
+          if (entry) {
+            this.hide();
+            this.callbacks.switchToPane(entry.tabIndex, entry.paneIndex);
+          }
+        });
+      }
+    } catch (e) {
+      console.error('Render error:', e);
+      this.overlay.innerHTML = '<div class="error">Something went wrong</div>';
+    }
   }
 }

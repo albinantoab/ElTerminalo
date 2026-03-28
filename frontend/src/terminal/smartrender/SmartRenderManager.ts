@@ -6,7 +6,7 @@ import { renderTable } from './renderers/TableRenderer';
 import { renderError } from './renderers/ErrorRenderer';
 import { stripAnsi } from '../../utils';
 
-const MAX_BADGES = 30;
+const MAX_BADGES = 50;
 
 interface SmartBadge {
   block: CommandBlock;
@@ -23,6 +23,9 @@ export class SmartRenderManager {
   private activeBadge: SmartBadge | null = null;
   private cellHeight = 0;
   private _raf = 0;
+  private needsReposition = false;
+  private unsubCommandFinished: (() => void) | null = null;
+  private resizeObserver: ResizeObserver | null = null;
 
   public onBadgesChanged: (() => void) | null = null;
 
@@ -31,20 +34,26 @@ export class SmartRenderManager {
     this.paneElement = paneElement;
     this.shellIntegration = shellIntegration;
 
-    this.shellIntegration.onCommandFinishedAdd((block) => {
+    this.unsubCommandFinished = this.shellIntegration.onCommandFinishedAdd((block) => {
       this.handleCommandFinished(block);
     });
 
-    // Reposition badges every animation frame — the only reliable way to
-    // track scroll, new output, and resize with a position:fixed overlay.
-    const tick = () => {
-      this.updateCellHeight();
-      this.repositionAll();
-      if (this.panel) this.repositionPanel();
-      this._raf = requestAnimationFrame(tick);
-    };
-    this._raf = requestAnimationFrame(tick);
+    this.terminal.onScroll(() => this.scheduleReposition());
+    this.resizeObserver = new ResizeObserver(() => this.scheduleReposition());
+    this.resizeObserver.observe(paneElement);
     this.terminal.onWriteParsed(() => this.cleanupInvalid());
+  }
+
+  private scheduleReposition(): void {
+    if (!this.needsReposition) {
+      this.needsReposition = true;
+      this._raf = requestAnimationFrame(() => {
+        this.needsReposition = false;
+        this.updateCellHeight();
+        this.repositionAll();
+        if (this.panel) this.repositionPanel();
+      });
+    }
   }
 
   private updateCellHeight(): void {
@@ -82,7 +91,6 @@ export class SmartRenderManager {
 
     el.addEventListener('click', () => this.togglePanel(badge));
 
-    // Clean up when the output end marker is disposed (scrollback trimmed)
     const endMarker = block.outputEndMarker;
     if (endMarker) {
       endMarker.onDispose(() => {
@@ -93,9 +101,15 @@ export class SmartRenderManager {
       });
     }
 
-    // Append to body (fixed position, outside WebGL stacking context)
-    document.body.appendChild(el);
-    this.positionBadge(badge);
+    try {
+      document.body.appendChild(el);
+      this.positionBadge(badge);
+      this.scheduleReposition();
+    } catch (e) {
+      el.remove();
+      const idx = this.badges.indexOf(badge);
+      if (idx >= 0) this.badges.splice(idx, 1);
+    }
   }
 
   private positionBadge(badge: SmartBadge): void {
@@ -158,48 +172,57 @@ export class SmartRenderManager {
     this.activeBadge = badge;
     badge.element.classList.add('smart-badge-active');
 
-    this.panel = document.createElement('div');
-    this.panel.className = 'smart-panel';
+    const panel = document.createElement('div');
+    panel.className = 'smart-panel';
 
-    const header = document.createElement('div');
-    header.className = 'smart-panel-header';
-    const title = document.createElement('span');
-    title.className = 'smart-panel-title';
-    title.textContent = badge.detection.type === 'json' ? 'JSON Output'
-      : badge.detection.type === 'table' ? 'Table Output' : 'Error Output';
-    const actions = document.createElement('div');
-    actions.className = 'smart-panel-actions';
-    const copyBtn = document.createElement('span');
-    copyBtn.className = 'smart-panel-action';
-    copyBtn.textContent = 'Copy';
-    copyBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const raw = (badge.detection as { raw: string }).raw || '';
-      if (raw) navigator.clipboard.writeText(raw);
-      copyBtn.textContent = 'Copied';
-      setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1000);
-    });
-    const closeBtn = document.createElement('span');
-    closeBtn.className = 'smart-panel-close';
-    closeBtn.textContent = '\u00D7';
-    closeBtn.addEventListener('click', (e) => { e.stopPropagation(); this.closePanel(); });
-    actions.appendChild(copyBtn);
-    actions.appendChild(closeBtn);
-    header.appendChild(title);
-    header.appendChild(actions);
-    this.panel.appendChild(header);
+    try {
+      const header = document.createElement('div');
+      header.className = 'smart-panel-header';
+      const title = document.createElement('span');
+      title.className = 'smart-panel-title';
+      title.textContent = badge.detection.type === 'json' ? 'JSON Output'
+        : badge.detection.type === 'table' ? 'Table Output' : 'Error Output';
+      const actions = document.createElement('div');
+      actions.className = 'smart-panel-actions';
+      const copyBtn = document.createElement('span');
+      copyBtn.className = 'smart-panel-action';
+      copyBtn.textContent = 'Copy';
+      copyBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const raw = (badge.detection as { raw: string }).raw || '';
+        if (raw) navigator.clipboard.writeText(raw);
+        copyBtn.textContent = 'Copied';
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1000);
+      });
+      const closeBtn = document.createElement('span');
+      closeBtn.className = 'smart-panel-close';
+      closeBtn.textContent = '\u00D7';
+      closeBtn.addEventListener('click', (e) => { e.stopPropagation(); this.closePanel(); });
+      actions.appendChild(copyBtn);
+      actions.appendChild(closeBtn);
+      header.appendChild(title);
+      header.appendChild(actions);
+      panel.appendChild(header);
 
-    const content = document.createElement('div');
-    content.className = 'smart-panel-content';
-    switch (badge.detection.type) {
-      case 'json': renderJson(badge.detection.parsed, content); break;
-      case 'table': renderTable(badge.detection.headers, badge.detection.rows, content); break;
-      case 'error': renderError(badge.detection.raw, badge.detection.errorLines, badge.detection.exitCode, content); break;
+      const content = document.createElement('div');
+      content.className = 'smart-panel-content';
+      switch (badge.detection.type) {
+        case 'json': renderJson(badge.detection.parsed, content); break;
+        case 'table': renderTable(badge.detection.headers, badge.detection.rows, content); break;
+        case 'error': renderError(badge.detection.raw, badge.detection.errorLines, badge.detection.exitCode, content); break;
+      }
+      panel.appendChild(content);
+
+      document.body.appendChild(panel);
+      this.panel = panel;
+      this.repositionPanel();
+      this.scheduleReposition();
+    } catch (e) {
+      panel.remove();
+      this.panel = null;
+      this.activeBadge = null;
+      badge.element.classList.remove('smart-badge-active');
     }
-    this.panel.appendChild(content);
-
-    document.body.appendChild(this.panel);
-    this.repositionPanel();
   }
 
   private repositionPanel(): void {
@@ -238,6 +261,10 @@ export class SmartRenderManager {
 
   dispose(): void {
     cancelAnimationFrame(this._raf);
+    this.unsubCommandFinished?.();
+    this.unsubCommandFinished = null;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     this.closePanel();
     for (const b of this.badges) b.element.remove();
     this.badges = [];

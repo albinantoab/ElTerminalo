@@ -37,6 +37,23 @@ class ElTerminalo {
   private aiGenerating = false;
   private modelUpdateAvailable = false;
 
+  private stateSaveInterval: ReturnType<typeof setInterval> | null = null;
+  private updateCheckInterval: ReturnType<typeof setInterval> | null = null;
+
+  private onVisibilityChange = () => {
+    if (!document.hidden) this.focusActivePane();
+  };
+  private onWindowFocus = () => {
+    document.body.classList.remove('app-blurred');
+    this.focusActivePane();
+  };
+  private onWindowBlur = () => {
+    document.body.classList.add('app-blurred');
+  };
+  private onBeforeUnload = () => {
+    this.destroy();
+  };
+
   // Current tab helpers
   private get tab(): Tab { return this.tabs[this.activeTabIndex]; }
   private get panes(): PaneInfo[] { return this.tab?.panes || []; }
@@ -145,19 +162,13 @@ class ElTerminalo {
     // Re-focus active pane when app regains focus (after lock/unlock, screen switch, etc.)
     // Without this, shortcuts stop working until the user clicks the terminal.
     // Also hide the active pane border when the app loses focus.
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) this.focusActivePane();
-    });
-    window.addEventListener('focus', () => {
-      document.body.classList.remove('app-blurred');
-      this.focusActivePane();
-    });
-    window.addEventListener('blur', () => {
-      document.body.classList.add('app-blurred');
-    });
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
+    window.addEventListener('focus', this.onWindowFocus);
+    window.addEventListener('blur', this.onWindowBlur);
+    window.addEventListener('beforeunload', this.onBeforeUnload);
 
     this.renderStatusBar();
-    setInterval(() => this.stateManager.save(), STATE_SAVE_INTERVAL_MS);
+    this.stateSaveInterval = setInterval(() => this.stateManager.save(), STATE_SAVE_INTERVAL_MS);
 
     // Dismiss splash screen
     this.dismissSplash();
@@ -167,7 +178,7 @@ class ElTerminalo {
     // Check for app + model updates in background (non-blocking), then every 6 hours
     this.checkForUpdate();
     this.checkModelUpdate();
-    setInterval(() => { this.checkForUpdate(); this.checkModelUpdate(); }, 6 * 60 * 60 * 1000);
+    this.updateCheckInterval = setInterval(() => { this.checkForUpdate(); this.checkModelUpdate(); }, 6 * 60 * 60 * 1000);
 
     // Listen for close confirmation request from the Go backend
     window.runtime.EventsOn('app:confirm-close', () => this.showCloseConfirmation());
@@ -199,9 +210,19 @@ class ElTerminalo {
     }, true);
   }
 
-  private shellEscape(path: string): string {
-    if (/^[a-zA-Z0-9_.\/~-]+$/.test(path)) return path;
-    return "'" + path.replace(/'/g, "'\\''") + "'";
+  private destroy(): void {
+    if (this.stateSaveInterval) { clearInterval(this.stateSaveInterval); this.stateSaveInterval = null; }
+    if (this.updateCheckInterval) { clearInterval(this.updateCheckInterval); this.updateCheckInterval = null; }
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    window.removeEventListener('focus', this.onWindowFocus);
+    window.removeEventListener('blur', this.onWindowBlur);
+    window.removeEventListener('beforeunload', this.onBeforeUnload);
+    this.stateManager.save();
+  }
+
+  private shellEscape(s: string): string {
+    if (!/[^a-zA-Z0-9@%+=:,./-]/.test(s)) return s;
+    return "'" + s.replace(/'/g, "'\\''") + "'";
   }
 
 
@@ -276,10 +297,8 @@ class ElTerminalo {
   private dismissSplash(): void {
     const splash = document.getElementById('splash');
     if (!splash) return;
-    // Let the progress bar finish, then fade out
     const minDisplayMs = 2000;
-    const elapsed = performance.now();
-    const remaining = Math.max(0, minDisplayMs - elapsed);
+    const remaining = Math.max(0, minDisplayMs - performance.now());
     setTimeout(() => {
       splash.classList.add('splash-exit');
       setTimeout(() => splash.remove(), 600);
@@ -349,11 +368,11 @@ class ElTerminalo {
     });
   }
 
-  private renameTab(index: number, newName: string): void {
+  private async renameTab(index: number, newName: string): Promise<void> {
     if (index >= 0 && index < this.tabs.length && newName.trim()) {
       this.tabs[index].name = newName.trim();
       this.renderTabBar();
-      this.stateManager.save();
+      await this.stateManager.save();
     }
   }
 
@@ -722,6 +741,7 @@ class ElTerminalo {
       </div>
     `;
 
+    // Safe: innerHTML above destroys old elements, so new addEventListener doesn't accumulate
     if (this.updateInfo?.available) {
       document.getElementById('status-update-link')?.addEventListener('click', () => {
         this.promptUpdate();
@@ -1022,7 +1042,6 @@ class ElTerminalo {
 
     try {
       await window.go.main.App.DownloadModel();
-      unsub();
 
       if (!cancelled) {
         statusEl.textContent = 'Loading model...';
@@ -1039,7 +1058,6 @@ class ElTerminalo {
         this.focusActivePane();
       }
     } catch {
-      unsub();
       if (cancelled) {
         overlay.remove();
       } else {
@@ -1049,6 +1067,8 @@ class ElTerminalo {
         if (cancelBtn) cancelBtn.textContent = 'Close';
       }
       this.focusActivePane();
+    } finally {
+      unsub();
     }
 
     document.removeEventListener('keydown', onKey, true);
@@ -1198,22 +1218,22 @@ class ElTerminalo {
     if (this.panes.length <= 1) return;
     const current = this.panes[this.activeIndex].element.getBoundingClientRect();
     const cx = current.left + current.width / 2, cy = current.top + current.height / 2;
+    const isHorizontal = direction === 'left' || direction === 'right';
     let bestIndex = -1, bestDist = Infinity;
     for (let i = 0; i < this.panes.length; i++) {
       if (i === this.activeIndex) continue;
       const rect = this.panes[i].element.getBoundingClientRect();
       const px = rect.left + rect.width / 2, py = rect.top + rect.height / 2;
-      let valid = false;
-      switch (direction) {
-        case 'left': valid = px < cx - SPATIAL_NAV_THRESHOLD; break;
-        case 'right': valid = px > cx + SPATIAL_NAV_THRESHOLD; break;
-        case 'up': valid = py < cy - SPATIAL_NAV_THRESHOLD; break;
-        case 'down': valid = py > cy + SPATIAL_NAV_THRESHOLD; break;
+      // Early-out: skip panes that are clearly in the wrong direction
+      if (isHorizontal) {
+        if (direction === 'left' && px >= cx - SPATIAL_NAV_THRESHOLD) continue;
+        if (direction === 'right' && px <= cx + SPATIAL_NAV_THRESHOLD) continue;
+      } else {
+        if (direction === 'up' && py >= cy - SPATIAL_NAV_THRESHOLD) continue;
+        if (direction === 'down' && py <= cy + SPATIAL_NAV_THRESHOLD) continue;
       }
-      if (valid) {
-        const dist = Math.abs(px - cx) + Math.abs(py - cy);
-        if (dist < bestDist) { bestDist = dist; bestIndex = i; }
-      }
+      const dist = Math.abs(px - cx) + Math.abs(py - cy);
+      if (dist < bestDist) { bestDist = dist; bestIndex = i; }
     }
     if (bestIndex >= 0) this.setActive(bestIndex);
   }

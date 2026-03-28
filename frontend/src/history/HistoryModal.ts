@@ -17,6 +17,7 @@ export class HistoryModal {
   private overlay: HTMLElement;
   private callbacks: HistoryModalCallbacks;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private delegationAttached = false;
 
   constructor(overlay: HTMLElement, callbacks: HistoryModalCallbacks) {
     this.overlay = overlay;
@@ -35,6 +36,10 @@ export class HistoryModal {
   }
 
   hide(): void {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
     this.open = false;
     this.overlay.classList.add('hidden');
     this.callbacks.focusActivePane();
@@ -102,62 +107,80 @@ export class HistoryModal {
   }
 
   private render(): void {
-    const all = this.getAllEntries();
-    let idx = 0;
-    let items = '';
+    try {
+      const MAX_DISPLAY = 200;
+      const all = this.getAllEntries();
+      let idx = 0;
+      let items = '';
+      let truncated = false;
 
-    if (this.cwdEntries.length > 0) {
-      items += '<div class="history-group">Current Directory</div>';
-      for (const entry of this.cwdEntries) {
-        items += this.renderRow(entry, idx, false);
-        idx++;
-      }
-    }
-
-    if (this.globalEntries.length > 0) {
-      items += '<div class="history-group">All History</div>';
-      for (const entry of this.globalEntries) {
-        items += this.renderRow(entry, idx, true);
-        idx++;
-      }
-    }
-
-    if (all.length === 0) {
-      items = '<div class="history-empty">No history found</div>';
-    }
-
-    this.overlay.innerHTML = `
-      <div class="history-box">
-        <input class="history-input" type="text" placeholder="Search command history..." value="${escHtml(this.query)}" />
-        <div class="history-list">${items}</div>
-        <div class="history-footer">
-          <kbd>ENTER</kbd> paste · <kbd>${CMD.FILL.shortcut}</kbd> execute · <kbd>ESC</kbd> close
-        </div>
-      </div>
-    `;
-
-    const input = this.overlay.querySelector('.history-input') as HTMLInputElement;
-    input?.addEventListener('input', (e) => {
-      this.query = (e.target as HTMLInputElement).value;
-      if (this.debounceTimer) clearTimeout(this.debounceTimer);
-      this.debounceTimer = setTimeout(() => this.fetchResults(), 150);
-    });
-
-    this.overlay.querySelector('.history-row.selected')?.scrollIntoView({ block: 'nearest' });
-
-    this.overlay.querySelectorAll('.history-row[data-idx]').forEach(el => {
-      el.addEventListener('click', () => {
-        const i = parseInt(el.getAttribute('data-idx') || '0');
-        const entry = all[i];
-        if (entry) {
-          const sessionId = this.callbacks.getActiveSessionId();
-          if (sessionId) {
-            window.go.main.App.WriteToSession(sessionId, utf8ToBase64(entry.command));
-          }
-          this.hide();
+      if (this.cwdEntries.length > 0) {
+        items += '<div class="history-group">Current Directory</div>';
+        for (const entry of this.cwdEntries) {
+          if (idx >= MAX_DISPLAY) { truncated = true; break; }
+          items += this.renderRow(entry, idx, false);
+          idx++;
         }
-      });
-    });
+      }
+
+      if (!truncated && this.globalEntries.length > 0) {
+        items += '<div class="history-group">All History</div>';
+        for (const entry of this.globalEntries) {
+          if (idx >= MAX_DISPLAY) { truncated = true; break; }
+          items += this.renderRow(entry, idx, true);
+          idx++;
+        }
+      }
+
+      if (truncated) {
+        items += `<div class="history-empty">Showing first ${MAX_DISPLAY} results. Refine your search for more.</div>`;
+      }
+
+      if (all.length === 0) {
+        items = '<div class="history-empty">No history found</div>';
+      }
+
+      this.overlay.innerHTML = `
+        <div class="history-box">
+          <input class="history-input" type="text" placeholder="Search command history..." value="${escHtml(this.query)}" />
+          <div class="history-list">${items}</div>
+          <div class="history-footer">
+            <kbd>ENTER</kbd> paste · <kbd>${escHtml(CMD.FILL.shortcut)}</kbd> execute · <kbd>ESC</kbd> close
+          </div>
+        </div>
+      `;
+
+      const input = this.overlay.querySelector('.history-input') as HTMLInputElement;
+      if (input) {
+        input.oninput = (e) => {
+          this.query = (e.target as HTMLInputElement).value;
+          if (this.debounceTimer) clearTimeout(this.debounceTimer);
+          this.debounceTimer = setTimeout(() => this.fetchResults(), 150);
+        };
+      }
+
+      this.overlay.querySelector('.history-row.selected')?.scrollIntoView({ block: 'nearest' });
+
+      if (!this.delegationAttached) {
+        this.delegationAttached = true;
+        this.overlay.addEventListener('click', (e) => {
+          const row = (e.target as HTMLElement).closest('.history-row[data-idx]');
+          if (!row) return;
+          const i = parseInt(row.getAttribute('data-idx') || '0');
+          const entry = this.getAllEntries()[i];
+          if (entry) {
+            const sessionId = this.callbacks.getActiveSessionId();
+            if (sessionId) {
+              window.go.main.App.WriteToSession(sessionId, utf8ToBase64(entry.command));
+            }
+            this.hide();
+          }
+        });
+      }
+    } catch (e) {
+      console.error('Render error:', e);
+      this.overlay.innerHTML = '<div class="error">Something went wrong</div>';
+    }
   }
 
   private renderRow(entry: HistoryEntry, idx: number, showCwd: boolean): string {

@@ -72,7 +72,7 @@ func NewSession(shell, configDir string, cols, rows int, cwd string) (*Session, 
 		// Bootstrap via PROMPT_COMMAND: sources integration on first prompt,
 		// then restores any original PROMPT_COMMAND.
 		script := filepath.Join(shellIntegrationDir, "elterminalo-integration-bash.sh")
-		env = append(env, "PROMPT_COMMAND=source "+script)
+		env = append(env, "PROMPT_COMMAND=source '"+script+"'")
 	}
 
 	cmd.Env = env

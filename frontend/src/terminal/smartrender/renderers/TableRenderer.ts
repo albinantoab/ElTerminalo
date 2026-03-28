@@ -8,6 +8,24 @@ export function renderTable(headers: string[], rows: string[][], container: HTML
   const headerRow = document.createElement('tr');
   let sortCol = -1;
   let sortAsc = true;
+  let cachedSorted: string[][] | null = null;
+
+  const doSort = (colIdx: number, asc: boolean) => {
+    if (cachedSorted && sortCol === colIdx && sortAsc === asc) return;
+    sortCol = colIdx;
+    sortAsc = asc;
+    cachedSorted = [...rows].sort((a, b) => {
+      const va = a[colIdx] || '';
+      const vb = b[colIdx] || '';
+      const na = Number(va);
+      const nb = Number(vb);
+      if (!isNaN(na) && !isNaN(nb)) return asc ? na - nb : nb - na;
+      return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+    });
+    tbody.innerHTML = '';
+    const display = cachedSorted.slice(0, 200);
+    for (const row of display) tbody.appendChild(createRow(row, headers.length));
+  };
 
   for (let i = 0; i < headers.length; i++) {
     const th = document.createElement('th');
@@ -15,8 +33,8 @@ export function renderTable(headers: string[], rows: string[][], container: HTML
     th.className = 'smart-overlay-interactive';
     th.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (sortCol === i) { sortAsc = !sortAsc; } else { sortCol = i; sortAsc = true; }
-      sortRows(tbody, rows, i, sortAsc, headers.length);
+      const newAsc = sortCol === i ? !sortAsc : true;
+      doSort(i, newAsc);
     });
     headerRow.appendChild(th);
   }
@@ -30,7 +48,6 @@ export function renderTable(headers: string[], rows: string[][], container: HTML
   }
   table.appendChild(tbody);
 
-  // Put table directly in container (no wrapper div that breaks sticky)
   container.appendChild(table);
 
   if (rows.length > 200) {
@@ -51,22 +68,8 @@ function createRow(row: string[], colCount: number): HTMLElement {
   const tr = document.createElement('tr');
   for (let i = 0; i < colCount; i++) {
     const td = document.createElement('td');
-    td.textContent = row[i] || '';
+    td.textContent = i < row.length ? (row[i] || '') : '';
     tr.appendChild(td);
   }
   return tr;
-}
-
-function sortRows(tbody: HTMLElement, rows: string[][], colIdx: number, asc: boolean, colCount: number): void {
-  const sorted = [...rows].sort((a, b) => {
-    const va = a[colIdx] || '';
-    const vb = b[colIdx] || '';
-    const na = Number(va);
-    const nb = Number(vb);
-    if (!isNaN(na) && !isNaN(nb)) return asc ? na - nb : nb - na;
-    return asc ? va.localeCompare(vb) : vb.localeCompare(va);
-  });
-  tbody.innerHTML = '';
-  const display = sorted.slice(0, 200);
-  for (const row of display) tbody.appendChild(createRow(row, colCount));
 }

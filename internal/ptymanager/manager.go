@@ -84,7 +84,11 @@ func (m *Manager) readLoop(session *Session) {
 			if n > 0 {
 				data := make([]byte, n)
 				copy(data, buf[:n])
-				dataCh <- data
+				select {
+				case dataCh <- data:
+				case <-doneCh:
+					return
+				}
 			}
 			if err != nil {
 				close(doneCh)
@@ -110,7 +114,9 @@ func (m *Manager) readLoop(session *Session) {
 		select {
 		case data := <-dataCh:
 			accum = append(accum, data...)
-			if len(accum) > batchFlushBytes {
+			if len(accum) >= batchAccumCap {
+				flush()
+			} else if len(accum) > batchFlushBytes {
 				flush()
 			}
 		case <-ticker.C:

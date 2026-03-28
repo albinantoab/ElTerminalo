@@ -6,7 +6,10 @@ export function renderError(raw: string, errorLines: number[], exitCode: number 
   // Header
   const header = document.createElement('div');
   header.className = 'smart-error-header';
-  header.innerHTML = `<span class="smart-error-dot"></span> Error${exitCode ? ` (exit ${exitCode})` : ''}`;
+  const dot = document.createElement('span');
+  dot.className = 'smart-error-dot';
+  header.appendChild(dot);
+  header.appendChild(document.createTextNode(` Error${exitCode ? ` (exit ${exitCode})` : ''}`));
   wrapper.appendChild(header);
 
   // Output with highlighted error lines

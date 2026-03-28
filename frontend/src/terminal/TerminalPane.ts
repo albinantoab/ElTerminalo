@@ -189,6 +189,8 @@ export class TerminalPane {
 
     const dismiss = () => {
       if (menu) { menu.remove(); menu = null; }
+      document.removeEventListener('mousedown', dismiss);
+      document.removeEventListener('keydown', dismiss);
     };
 
     container.addEventListener('contextmenu', (e) => {
@@ -297,11 +299,10 @@ export class TerminalPane {
         if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
         if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 4}px`;
       });
-    }, true);
 
-    // Dismiss on any click or keydown
-    document.addEventListener('mousedown', dismiss);
-    document.addEventListener('keydown', dismiss);
+      document.addEventListener('mousedown', dismiss);
+      document.addEventListener('keydown', dismiss);
+    }, true);
   }
 
   setContextActions(actions: TerminalContextActions): void {
@@ -397,7 +398,7 @@ export class TerminalPane {
     if (this.sessionId) {
       window.go.main.App.CloseSession(this.sessionId);
     }
-    this.resizeObserver.disconnect();
+    if (this.resizeObserver) this.resizeObserver.disconnect();
     if (this.eventCleanup) {
       this.eventCleanup();
     }

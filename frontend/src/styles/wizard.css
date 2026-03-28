@@ -57,6 +57,11 @@
   border-color: var(--accent);
 }
 
+.input-error {
+  border-color: #ff5572 !important;
+  transition: border-color 0.3s;
+}
+
 .wizard-textarea {
   resize: none;
   flex: 1;

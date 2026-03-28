@@ -153,9 +153,11 @@ export class ThemeWizard {
 
     const name = getVal('name');
     if (!name) {
-      // Flash the name field
       const nameInput = this.overlay.querySelector('.theme-name-input') as HTMLInputElement;
-      if (nameInput) { nameInput.style.borderColor = '#ff5572'; setTimeout(() => { nameInput.style.borderColor = ''; }, 1500); }
+      if (nameInput) {
+        nameInput.classList.add('input-error');
+        setTimeout(() => nameInput.classList.remove('input-error'), 1500);
+      }
       return;
     }
 
