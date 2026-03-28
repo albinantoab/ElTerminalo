@@ -22,19 +22,19 @@ Download the latest `.dmg` from [Releases](https://github.com/albinantoab/ElTerm
 ## Demos
 
 ### AI Assistant
-<video src="assets/videos/ai.mp4" width="100%" autoplay loop muted playsinline></video>
+https://github.com/user-attachments/assets/e657f481-2b18-42e9-a978-a57fe2bd120c
 
 ### JSON Viewer
-<video src="assets/videos/json.mp4" width="100%" autoplay loop muted playsinline></video>
+https://github.com/user-attachments/assets/3b7b4f84-1efa-46d7-b6dc-9716ecd186dd
 
 ### Table View
-<video src="assets/videos/table.mp4" width="100%" autoplay loop muted playsinline></video>
+https://github.com/user-attachments/assets/3535f539-9767-4935-ab8a-d3f9117e63e5
 
 ### Custom Shortcuts
-<video src="assets/videos/shortcuts.mp4" width="100%" autoplay loop muted playsinline></video>
+https://github.com/user-attachments/assets/0b5a8134-3b50-4bf2-95ed-6ceff2162413
 
 ### Status Modal
-<video src="assets/videos/status-modal.mp4" width="100%" autoplay loop muted playsinline></video>
+https://github.com/user-attachments/assets/91a65c8d-0ce1-4052-980d-c3a78a00c360
 
 ## Keyboard Shortcuts
 
