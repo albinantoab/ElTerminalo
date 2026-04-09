@@ -32,7 +32,7 @@ export const CMD = {
   // Panes
   SPLIT_VERTICAL:   cmd('Split Vertical',     'Split pane side by side',                  'CMD+|',        'Panes'),
   SPLIT_HORIZONTAL: cmd('Split Horizontal',   'Split pane top/bottom',                    'CMD+-',        'Panes'),
-  CLOSE_PANE:       cmd('Close Pane',         'Close the active pane',                    'CMD+X',        'Panes'),
+  CLOSE_PANE:       cmd('Close Pane',         'Close the active pane',                    'CMD+SHIFT+X',  'Panes'),
   NEXT_PANE:        cmd('Next Pane',          'Focus the next pane',                      'CMD+→',        'Panes'),
   PREV_PANE:        cmd('Previous Pane',      'Focus the previous pane',                  'CMD+←',        'Panes'),
 
@@ -70,7 +70,7 @@ export const BUILT_IN_SHORTCUTS: Record<string, string> = {
   'cmd+p': CMD.COMMAND_PALETTE.name,
   'cmd+|': CMD.SPLIT_VERTICAL.name,
   'cmd+-': CMD.SPLIT_HORIZONTAL.name,
-  'cmd+x': CMD.CLOSE_PANE.name,
+  'cmd+shift+x': CMD.CLOSE_PANE.name,
   'cmd+l': CMD.CLEAR_TERMINAL.name,
   'cmd+shift+c': CMD.CREATE_COMMAND.name,
   'cmd+e': CMD.EDIT_COMMAND.name,

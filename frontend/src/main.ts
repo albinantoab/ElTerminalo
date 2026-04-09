@@ -442,7 +442,7 @@ class ElTerminalo {
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         const idx = parseInt(el.getAttribute('data-close') || '0');
-        this.closeTab(idx);
+        this.confirmCloseTab(idx);
       });
     });
 
@@ -536,7 +536,7 @@ class ElTerminalo {
     pane.setContextActions({
       splitVertical: () => this.splitPane('vertical'),
       splitHorizontal: () => this.splitPane('horizontal'),
-      closePane: () => this.closeActivePane(),
+      closePane: () => this.confirmCloseActivePane(),
     });
 
     pane.smartRender.onBadgesChanged = () => this.renderStatusBar();
@@ -605,6 +605,42 @@ class ElTerminalo {
     await newPane.pane.connect();
     this.setActive(this.panes.indexOf(newPane));
     this.stateManager.save();
+  }
+
+  private showConfirmDialog(title: string, body: string, confirmLabel: string, onConfirm: () => void): void {
+    if (document.querySelector('.confirm-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'update-overlay confirm-overlay';
+    overlay.innerHTML = `<div class="update-dialog">
+      <div class="update-dialog-title">${title}</div>
+      <div class="update-dialog-body">${body}</div>
+      <div class="update-dialog-actions">
+        <button class="theme-btn theme-btn-cancel" id="confirm-cancel">Cancel</button>
+        <button class="theme-btn theme-btn-save" id="confirm-ok" style="background:#f85149;border-color:#f85149;">${confirmLabel}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    const dismiss = () => { overlay.remove(); document.removeEventListener('keydown', onKey, true); };
+    const confirm = () => { dismiss(); onConfirm(); };
+    document.getElementById('confirm-cancel')?.addEventListener('click', dismiss);
+    document.getElementById('confirm-ok')?.addEventListener('click', confirm);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') dismiss();
+      if (e.key === 'Enter') confirm();
+      e.stopPropagation();
+    };
+    document.addEventListener('keydown', onKey, true);
+  }
+
+  private confirmCloseActivePane(): void {
+    if (this.panes.length <= 1 || !this.layoutRoot) return;
+    this.showConfirmDialog('Close Pane?', 'The active pane and its session will be closed.', 'Close', () => this.closeActivePane());
+  }
+
+  private confirmCloseTab(index: number): void {
+    if (this.tabs.length <= 1) return;
+    const paneCount = this.tabs[index]?.panes.length ?? 0;
+    this.showConfirmDialog('Close Tab?', `${paneCount} pane${paneCount !== 1 ? 's' : ''} in this tab will be closed.`, 'Close', () => this.closeTab(index));
   }
 
   private closeActivePane(): void {
@@ -849,11 +885,11 @@ class ElTerminalo {
   private getBuiltInCommands(): PaletteCommand[] {
     return [
       { name: CMD.NEW_TAB.name, desc: CMD.NEW_TAB.desc, category: CMD.NEW_TAB.category, shortcutDisplay: CMD.NEW_TAB.shortcut, action: () => this.createTab() },
-      { name: CMD.CLOSE_TAB.name, desc: CMD.CLOSE_TAB.desc, category: CMD.CLOSE_TAB.category, shortcutDisplay: CMD.CLOSE_TAB.shortcut, action: () => this.closeTab(this.activeTabIndex) },
+      { name: CMD.CLOSE_TAB.name, desc: CMD.CLOSE_TAB.desc, category: CMD.CLOSE_TAB.category, shortcutDisplay: CMD.CLOSE_TAB.shortcut, action: () => this.confirmCloseTab(this.activeTabIndex) },
       { name: CMD.RENAME_TAB.name, desc: CMD.RENAME_TAB.desc, category: CMD.RENAME_TAB.category, action: () => { this.palette.hide(); this.renamingTabIndex = this.activeTabIndex; this.renderTabBar(); } },
       { name: CMD.SPLIT_VERTICAL.name, desc: CMD.SPLIT_VERTICAL.desc, category: CMD.SPLIT_VERTICAL.category, shortcutDisplay: CMD.SPLIT_VERTICAL.shortcut, action: () => this.splitPane('vertical') },
       { name: CMD.SPLIT_HORIZONTAL.name, desc: CMD.SPLIT_HORIZONTAL.desc, category: CMD.SPLIT_HORIZONTAL.category, shortcutDisplay: CMD.SPLIT_HORIZONTAL.shortcut, action: () => this.splitPane('horizontal') },
-      { name: CMD.CLOSE_PANE.name, desc: CMD.CLOSE_PANE.desc, category: CMD.CLOSE_PANE.category, shortcutDisplay: CMD.CLOSE_PANE.shortcut, action: () => this.closeActivePane() },
+      { name: CMD.CLOSE_PANE.name, desc: CMD.CLOSE_PANE.desc, category: CMD.CLOSE_PANE.category, shortcutDisplay: CMD.CLOSE_PANE.shortcut, action: () => this.confirmCloseActivePane() },
       { name: CMD.NEXT_PANE.name, desc: CMD.NEXT_PANE.desc, category: CMD.NEXT_PANE.category, shortcutDisplay: CMD.NEXT_PANE.shortcut, action: () => this.navigateSpatial('right') },
       { name: CMD.PREV_PANE.name, desc: CMD.PREV_PANE.desc, category: CMD.PREV_PANE.category, shortcutDisplay: CMD.PREV_PANE.shortcut, action: () => this.navigateSpatial('left') },
       { name: CMD.NAV_PREV_COMMAND.name, desc: CMD.NAV_PREV_COMMAND.desc, category: CMD.NAV_PREV_COMMAND.category, shortcutDisplay: CMD.NAV_PREV_COMMAND.shortcut, action: () => { this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('prev'); } },
@@ -1206,16 +1242,20 @@ class ElTerminalo {
         this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('next');
         return;
       }
+      if (e.shiftKey && e.key.toLowerCase() === 'x') {
+        e.preventDefault();
+        this.confirmCloseActivePane();
+        return;
+      }
 
       switch (e.key.toLowerCase()) {
         case 'k': e.preventDefault(); this.handleAskAI(); return;
         case 'i': e.preventDefault(); this.statusModal.show(); return;
         case 'p': e.preventDefault(); this.palette.show(); return;
         case 't': e.preventDefault(); this.createTab(); return;
-        case 'w': e.preventDefault(); this.closeTab(this.activeTabIndex); return;
+        case 'w': e.preventDefault(); this.confirmCloseTab(this.activeTabIndex); return;
         case '|': e.preventDefault(); this.splitPane('vertical'); return;
         case '-': e.preventDefault(); this.splitPane('horizontal'); return;
-        case 'x': e.preventDefault(); this.closeActivePane(); return;
         case 'l': e.preventDefault(); this.clearActiveTerminal(); return;
         case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9':
           e.preventDefault();

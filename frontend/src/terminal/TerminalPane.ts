@@ -87,6 +87,12 @@ export class TerminalPane {
         window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x1b[13;2u'));
         return false;
       }
+      // CMD+Backspace: delete entire line (send Ctrl+U)
+      if (e.type === 'keydown' && e.metaKey && e.key === 'Backspace') {
+        e.preventDefault();
+        window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x15'));
+        return false;
+      }
       return true;
     });
 
