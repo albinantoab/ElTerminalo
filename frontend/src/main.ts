@@ -40,6 +40,8 @@ class ElTerminalo {
 
   private stateSaveInterval: ReturnType<typeof setInterval> | null = null;
   private updateCheckInterval: ReturnType<typeof setInterval> | null = null;
+  private statsInterval: ReturnType<typeof setInterval> | null = null;
+  private systemStats: { cpuPercent: number; memoryMB: number } | null = null;
 
   private onVisibilityChange = () => {
     if (!document.hidden) this.focusActivePane();
@@ -181,6 +183,11 @@ class ElTerminalo {
     this.checkModelUpdate();
     this.updateCheckInterval = setInterval(() => { this.checkForUpdate(); this.checkModelUpdate(); }, 6 * 60 * 60 * 1000);
 
+    // Poll process CPU/memory for the status bar. First call primes the
+    // sampler (returns 0% CPU), so kick off immediately and then on a tick.
+    this.pollSystemStats();
+    this.statsInterval = setInterval(() => this.pollSystemStats(), 3000);
+
     // Listen for close confirmation request from the Go backend
     window.runtime.EventsOn('app:confirm-close', () => this.showCloseConfirmation());
 
@@ -214,6 +221,7 @@ class ElTerminalo {
   private destroy(): void {
     if (this.stateSaveInterval) { clearInterval(this.stateSaveInterval); this.stateSaveInterval = null; }
     if (this.updateCheckInterval) { clearInterval(this.updateCheckInterval); this.updateCheckInterval = null; }
+    if (this.statsInterval) { clearInterval(this.statsInterval); this.statsInterval = null; }
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     window.removeEventListener('focus', this.onWindowFocus);
     window.removeEventListener('blur', this.onWindowBlur);
@@ -238,6 +246,16 @@ class ElTerminalo {
       }
     } catch (_) {
       // Silently ignore — update check is best-effort
+    }
+  }
+
+  private async pollSystemStats(): Promise<void> {
+    try {
+      const s = await window.go.main.App.GetSystemStats();
+      this.systemStats = { cpuPercent: s.cpuPercent, memoryMB: s.memoryMB };
+      this.renderStatusBar();
+    } catch (_) {
+      // Best-effort — leave previous reading in place
     }
   }
 
@@ -762,11 +780,22 @@ class ElTerminalo {
 
   private renderStatusBar(): void {
     const updateBadge = this.updateInfo?.available
-      ? `<a class="status-update" id="status-update-link">Update v${escHtml(this.updateInfo.latestVersion)} available</a><span class="status-sep">|</span>`
+      ? `<a class="status-update" id="status-update-link">Update v${escHtml(this.updateInfo.latestVersion)} available</a>`
       : '';
 
+    let statsBadge = '';
+    if (this.systemStats) {
+      const cpu = this.systemStats.cpuPercent.toFixed(1);
+      const mem = this.systemStats.memoryMB >= 1024
+        ? (this.systemStats.memoryMB / 1024).toFixed(2) + ' GB'
+        : Math.round(this.systemStats.memoryMB) + ' MB';
+      statsBadge = `<span class="status-stats"><span class="status-stat-label">CPU</span><span class="status-stat-value">${cpu}%</span><span class="status-stat-label">MEM</span><span class="status-stat-value">${mem}</span></span>`;
+    }
+
+    const leftSep = updateBadge && statsBadge ? '<span class="status-sep">|</span>' : '';
+
     this.statusbar.innerHTML = `
-      <div class="status-left">${updateBadge}</div>
+      <div class="status-left">${updateBadge}${leftSep}${statsBadge}</div>
       <div class="status-right">
         <span class="status-key">${CMD.AI_COMMAND.shortcut}</span><span class="status-label">ai</span>
         <span class="status-sep">|</span>

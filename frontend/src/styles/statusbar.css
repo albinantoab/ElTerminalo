@@ -73,6 +73,31 @@
   animation: statusPulse 1.5s ease-in-out infinite;
 }
 
+.status-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.status-stat-label {
+  color: #6b7280;
+  font-weight: 600;
+}
+
+.status-stat-value {
+  color: #9ca3af;
+  font-weight: 500;
+  margin-right: 4px;
+}
+
+.status-stat-value:last-child {
+  margin-right: 0;
+}
+
 .status-update {
   color: #56d364;
   font-size: 10px;

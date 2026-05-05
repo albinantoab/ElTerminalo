@@ -33,6 +33,12 @@ export interface WailsApp {
   SkipDownload(): Promise<void>;
   CheckModelUpdate(): Promise<boolean>;
   InitLLM(): Promise<void>;
+  GetSystemStats(): Promise<SystemStats>;
+}
+
+export interface SystemStats {
+  cpuPercent: number;
+  memoryMB: number;
 }
 
 export interface HistoryEntry {

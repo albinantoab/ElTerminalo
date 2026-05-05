@@ -16,6 +16,7 @@ import (
 	"github.com/albinanto/elterminalo/internal/llm"
 	"github.com/albinanto/elterminalo/internal/ptymanager"
 	"github.com/albinanto/elterminalo/internal/shellintegration"
+	"github.com/albinanto/elterminalo/internal/stats"
 	"github.com/albinanto/elterminalo/internal/theme"
 	"github.com/albinanto/elterminalo/internal/updater"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -41,6 +42,7 @@ type App struct {
 	downloadCancel context.CancelFunc
 	downloadMu     sync.Mutex
 	historyStore   *history.Store
+	statsSampler   *stats.Sampler
 }
 
 // NewApp creates a new App instance.
@@ -50,11 +52,12 @@ func NewApp(shell string, cfg *config.Config) *App {
 		fmt.Fprintf(os.Stderr, "Warning: cannot create drop directory: %v\n", err)
 	}
 	return &App{
-		shell:   shell,
-		ptyMgr:  ptymanager.NewManager(shell, cfg.Dir()),
-		cfg:     cfg,
-		cmds:    commands.NewStore(cfg.Dir()),
-		dropDir: dropDir,
+		shell:        shell,
+		ptyMgr:       ptymanager.NewManager(shell, cfg.Dir()),
+		cfg:          cfg,
+		cmds:         commands.NewStore(cfg.Dir()),
+		dropDir:      dropDir,
+		statsSampler: stats.New(),
 	}
 }
 
@@ -272,6 +275,15 @@ func (a *App) GetAllSessionStatuses() map[string]ptymanager.SessionStatus {
 // GetVersion returns the current application version.
 func (a *App) GetVersion() string {
 	return Version
+}
+
+// GetSystemStats returns the latest CPU% and resident memory for this process.
+// CPU% is computed against the previous call, so the first call returns 0%.
+func (a *App) GetSystemStats() stats.Snapshot {
+	if a.statsSampler == nil {
+		return stats.Snapshot{}
+	}
+	return a.statsSampler.Sample()
 }
 
 // CheckForUpdate checks GitHub for a newer release.
