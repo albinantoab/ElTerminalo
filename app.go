@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -286,9 +287,96 @@ func (a *App) GetSystemStats() stats.Snapshot {
 	return a.statsSampler.Sample()
 }
 
-// CheckForUpdate checks GitHub for a newer release.
+// updateCheckCacheTTL is how long a recorded update check stays valid before
+// we hit GitHub again. The frontend polls more often than this, but each call
+// returns the cached result until the TTL elapses.
+const updateCheckCacheTTL = 24 * time.Hour
+
+type updateCheckCache struct {
+	LastCheckedUnix int64              `json:"lastCheckedUnix"`
+	Info            updater.UpdateInfo `json:"info"`
+}
+
+func (a *App) updateCacheFile() string {
+	return filepath.Join(a.cfg.Dir(), "update_check.json")
+}
+
+func (a *App) loadUpdateCache() (updateCheckCache, bool) {
+	data, err := os.ReadFile(a.updateCacheFile())
+	if err != nil {
+		return updateCheckCache{}, false
+	}
+	var c updateCheckCache
+	if err := json.Unmarshal(data, &c); err != nil {
+		return updateCheckCache{}, false
+	}
+	return c, true
+}
+
+func (a *App) saveUpdateCache(c updateCheckCache) {
+	data, err := json.Marshal(c)
+	if err != nil {
+		return
+	}
+	path := a.updateCacheFile()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
+}
+
+// CheckForUpdate returns the latest update status, throttled to once per day.
+// If a check ran within the TTL we return the cached result instead of hitting
+// GitHub. The current version is refreshed on every call so cached info from
+// a prior install doesn't claim an update is still pending.
 func (a *App) CheckForUpdate() updater.UpdateInfo {
-	return updater.Check(Version)
+	if cached, ok := a.loadUpdateCache(); ok {
+		age := time.Since(time.Unix(cached.LastCheckedUnix, 0))
+		if age >= 0 && age < updateCheckCacheTTL && cached.Info.LatestVer != "" {
+			info := cached.Info
+			info.CurrentVer = Version
+			// Re-evaluate availability against the running binary in case the
+			// user updated by some other means since the last check.
+			info.Available = info.LatestVer != "" && info.LatestVer != Version && isVersionNewer(info.LatestVer, Version)
+			return info
+		}
+	}
+	info := updater.Check(Version)
+	a.saveUpdateCache(updateCheckCache{
+		LastCheckedUnix: time.Now().Unix(),
+		Info:            info,
+	})
+	return info
+}
+
+// isVersionNewer is a small semver-ish comparator (x.y.z) matching updater's
+// internal logic. Kept local so we can revalidate cached results without
+// exporting from the updater package.
+func isVersionNewer(latest, current string) bool {
+	lp, cp := splitDottedVersion(latest), splitDottedVersion(current)
+	for i := range 3 {
+		if lp[i] != cp[i] {
+			return lp[i] > cp[i]
+		}
+	}
+	return false
+}
+
+func splitDottedVersion(v string) [3]int {
+	var out [3]int
+	parts := strings.Split(strings.TrimPrefix(v, "v"), ".")
+	for i := 0; i < 3 && i < len(parts); i++ {
+		n := 0
+		for _, ch := range parts[i] {
+			if ch < '0' || ch > '9' {
+				break
+			}
+			n = n*10 + int(ch-'0')
+		}
+		out[i] = n
+	}
+	return out
 }
 
 // ApplyUpdate downloads and installs the latest release, then relaunches.

@@ -44,11 +44,18 @@ class ElTerminalo {
   private systemStats: { cpuPercent: number; memoryMB: number } | null = null;
 
   private onVisibilityChange = () => {
-    if (!document.hidden) this.focusActivePane();
+    if (!document.hidden) {
+      this.focusActivePane();
+      // After macOS sleep/lock the timer never fires, but visibilitychange
+      // does once the user comes back. Backend throttles to once per 24h, so
+      // calling on every visibility-restore is cheap.
+      this.checkForUpdate();
+    }
   };
   private onWindowFocus = () => {
     document.body.classList.remove('app-blurred');
     this.focusActivePane();
+    this.checkForUpdate();
   };
   private onWindowBlur = () => {
     document.body.classList.add('app-blurred');
@@ -178,10 +185,16 @@ class ElTerminalo {
 
     // AI model loads lazily on first Cmd+K use, unloads after idle.
 
-    // Check for app + model updates in background (non-blocking), then every 6 hours
+    // Update checks are event-driven, not interval-driven, because setInterval
+    // is unreliable across system sleep/lock. The Go backend persists the last
+    // check time and throttles to once per 24h. We trigger a check on:
+    //   - launch (here)
+    //   - window focus / visibility restore (handled in onWindowFocus etc.)
+    //   - a 30-min backstop pulse for unattended long-running sessions
+    // The backstop is cheap because the backend short-circuits if not due.
     this.checkForUpdate();
     this.checkModelUpdate();
-    this.updateCheckInterval = setInterval(() => { this.checkForUpdate(); this.checkModelUpdate(); }, 6 * 60 * 60 * 1000);
+    this.updateCheckInterval = setInterval(() => { this.checkForUpdate(); this.checkModelUpdate(); }, 30 * 60 * 1000);
 
     // Poll process CPU/memory for the status bar. First call primes the
     // sampler (returns 0% CPU), so kick off immediately and then on a tick.
@@ -240,8 +253,12 @@ class ElTerminalo {
   private async checkForUpdate(): Promise<void> {
     try {
       const info = await window.go.main.App.CheckForUpdate();
+      const wasAvailable = !!this.updateInfo?.available;
       if (info.available) {
         this.updateInfo = { available: true, latestVersion: info.latestVersion, url: info.url };
+        this.renderStatusBar();
+      } else if (wasAvailable) {
+        this.updateInfo = null;
         this.renderStatusBar();
       }
     } catch (_) {
