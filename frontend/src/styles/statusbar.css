@@ -76,26 +76,44 @@
 .status-stats {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.5px;
   white-space: nowrap;
 }
 
-.status-stat-label {
-  color: #6b7280;
-  font-weight: 600;
+.status-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #9ca3af;
+  transition: color 0.2s ease;
+}
+
+.status-stat-icon {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+  opacity: 0.85;
 }
 
 .status-stat-value {
-  color: #9ca3af;
   font-weight: 500;
-  margin-right: 4px;
 }
 
-.status-stat-value:last-child {
-  margin-right: 0;
+.status-stat.is-warning {
+  color: #f59e0b;
+}
+
+.status-stat.is-critical {
+  color: #ef4444;
+  animation: statusStatPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes statusStatPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 
 .status-update {

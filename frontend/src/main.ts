@@ -15,6 +15,25 @@ import {
 } from './constants';
 import './types/wails.d.ts';
 
+const ICON_CPU =
+  '<svg class="status-stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<rect x="5" y="5" width="14" height="14" rx="1.5"/>'
+  + '<rect x="9" y="9" width="6" height="6"/>'
+  + '<path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>'
+  + '</svg>';
+
+const ICON_MEM =
+  '<svg class="status-stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<rect x="2" y="7" width="20" height="10" rx="1"/>'
+  + '<path d="M6 11v2M10 11v2M14 11v2M18 11v2"/>'
+  + '</svg>';
+
+function severityClass(pct: number): string {
+  if (pct >= 90) return 'is-critical';
+  if (pct >= 70) return 'is-warning';
+  return '';
+}
+
 class ElTerminalo {
   private tabs: Tab[] = [];
   private activeTabIndex = 0;
@@ -41,7 +60,7 @@ class ElTerminalo {
   private stateSaveInterval: ReturnType<typeof setInterval> | null = null;
   private updateCheckInterval: ReturnType<typeof setInterval> | null = null;
   private statsInterval: ReturnType<typeof setInterval> | null = null;
-  private systemStats: { cpuPercent: number; memoryMB: number } | null = null;
+  private systemStats: { cpuPercent: number; memoryUsedMB: number; memoryTotalMB: number; memoryPercent: number } | null = null;
 
   private onVisibilityChange = () => {
     if (!document.hidden) {
@@ -269,7 +288,12 @@ class ElTerminalo {
   private async pollSystemStats(): Promise<void> {
     try {
       const s = await window.go.main.App.GetSystemStats();
-      this.systemStats = { cpuPercent: s.cpuPercent, memoryMB: s.memoryMB };
+      this.systemStats = {
+        cpuPercent: s.cpuPercent,
+        memoryUsedMB: s.memoryUsedMB,
+        memoryTotalMB: s.memoryTotalMB,
+        memoryPercent: s.memoryPercent,
+      };
       this.renderStatusBar();
     } catch (_) {
       // Best-effort — leave previous reading in place
@@ -803,10 +827,15 @@ class ElTerminalo {
     let statsBadge = '';
     if (this.systemStats) {
       const cpu = this.systemStats.cpuPercent.toFixed(1);
-      const mem = this.systemStats.memoryMB >= 1024
-        ? (this.systemStats.memoryMB / 1024).toFixed(2) + ' GB'
-        : Math.round(this.systemStats.memoryMB) + ' MB';
-      statsBadge = `<span class="status-stats"><span class="status-stat-label">CPU</span><span class="status-stat-value">${cpu}%</span><span class="status-stat-label">MEM</span><span class="status-stat-value">${mem}</span></span>`;
+      const memPct = this.systemStats.memoryPercent.toFixed(0);
+      const usedGB = (this.systemStats.memoryUsedMB / 1024).toFixed(1);
+      const totalGB = (this.systemStats.memoryTotalMB / 1024).toFixed(0);
+      const cpuLevel = severityClass(this.systemStats.cpuPercent);
+      const memLevel = severityClass(this.systemStats.memoryPercent);
+      statsBadge = `<span class="status-stats">`
+        + `<span class="status-stat ${cpuLevel}" aria-label="CPU usage">${ICON_CPU}<span class="status-stat-value">${cpu}%</span></span>`
+        + `<span class="status-stat ${memLevel}" aria-label="Memory usage">${ICON_MEM}<span class="status-stat-value">${usedGB}/${totalGB}G ${memPct}%</span></span>`
+        + `</span>`;
     }
 
     const leftSep = updateBadge && statsBadge ? '<span class="status-sep">|</span>' : '';

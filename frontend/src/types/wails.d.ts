@@ -38,7 +38,9 @@ export interface WailsApp {
 
 export interface SystemStats {
   cpuPercent: number;
-  memoryMB: number;
+  memoryUsedMB: number;
+  memoryTotalMB: number;
+  memoryPercent: number;
 }
 
 export interface HistoryEntry {
