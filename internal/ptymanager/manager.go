@@ -136,6 +136,12 @@ func (m *Manager) readLoop(session *Session) {
 			if m.ctx != nil {
 				wailsRuntime.EventsEmit(m.ctx, "pty:exit:"+session.ID, map[string]int{"exitCode": 0})
 			}
+			// Release the PTY fd and reap the child. A shell that exits on its
+			// own (exit/Ctrl-D, SSH drop, crash) would otherwise leak its ptmx
+			// fd and leave a zombie: CloseSession can't recover it once it's
+			// removed from the map below. Close is sync.Once-guarded, so this is
+			// a no-op when an explicit CloseSession already triggered this path.
+			session.Close()
 			m.mu.Lock()
 			delete(m.sessions, session.ID)
 			m.mu.Unlock()

@@ -20,6 +20,7 @@ esac
 DMG="${APP_NAME}-${VERSION}-macos-${ARCH_LABEL}.dmg"
 RELEASE_DIR="release"
 LOGO="assets/logo.png"
+ENTITLEMENTS="build/darwin/entitlements.plist"
 WAILS="${HOME}/go/bin/wails"
 
 # Use wails from PATH if available, otherwise try ~/go/bin
@@ -62,12 +63,25 @@ if [ -z "${SIGN_IDENTITY}" ]; then
 fi
 
 if [ -z "${SIGN_IDENTITY}" ]; then
-  echo "  ⚠ No Developer ID Application certificate found — using ad-hoc signing"
-  echo "  ⚠ Users will see Gatekeeper warnings. Install a Developer ID certificate for proper distribution."
-  codesign --force --deep --sign "-" "build/bin/${APP}" 2>/dev/null || true
+  if [ "${ALLOW_ADHOC_SIGN:-}" = "1" ]; then
+    echo "  ⚠ No Developer ID — ALLOW_ADHOC_SIGN=1 set: ad-hoc signing (LOCAL TESTING ONLY)."
+    echo "  ⚠ DO NOT distribute this build. An ad-hoc identity is unstable, so macOS will"
+    echo "    not reliably keep its TCC grants — users lose Documents/Desktop access mid-session."
+    codesign --force --options runtime --deep \
+      --entitlements "${ENTITLEMENTS}" --sign "-" "build/bin/${APP}" 2>/dev/null || true
+  else
+    echo "✗ No Developer ID Application certificate found."
+    echo "  Releases MUST be signed with a stable Developer ID. Ad-hoc/unsigned builds"
+    echo "  break macOS privacy (TCC): the app's folder grants stop applying mid-session,"
+    echo "  so 'ls' in ~/Documents starts failing with 'Operation not permitted' until"
+    echo "  the app is relaunched. Install a Developer ID certificate or set CODESIGN_IDENTITY."
+    echo "  (For local testing only — never to ship — re-run with ALLOW_ADHOC_SIGN=1.)"
+    exit 1
+  fi
 else
   echo "→ Code signing with: ${SIGN_IDENTITY}"
-  codesign --force --options runtime --deep --sign "${SIGN_IDENTITY}" "build/bin/${APP}"
+  codesign --force --options runtime --deep \
+    --entitlements "${ENTITLEMENTS}" --sign "${SIGN_IDENTITY}" "build/bin/${APP}"
   echo "✓ Code signed"
 
   # ── Step 4b: Notarize ──
