@@ -19,12 +19,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+      # Keyed on the Makefile because that is where GO_LLAMA_COMMIT lives —
+      # bumping the pin must invalidate the cache, or the old checkout is
+      # silently reused. go.mod stays in the key so dependency changes also
+      # force a rebuild.
       - name: Cache llama.cpp build
         id: cache-llm
         uses: actions/cache@v4
         with:
           path: deps/go-llama.cpp
-          key: llm-${{ runner.os }}-${{ hashFiles('go.mod') }}
+          key: llm-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod') }}
       - name: Build llama.cpp
         if: steps.cache-llm.outputs.cache-hit != 'true'
         run: make setup-llm
@@ -68,6 +72,17 @@ jobs:
           path: deps/go-llama.cpp
       - name: Stub frontend dist for go:embed
         run: mkdir -p frontend/dist && touch frontend/dist/index.html
+      # Fails loudly and specifically when deps/go-llama.cpp has drifted away
+      # from the pin, instead of surfacing as "updates to go.mod needed" buried
+      # in go vet output.
+      - name: Verify go.mod / go.sum are tidy
+        run: |
+          if ! go mod tidy -diff; then
+            echo "::error::go.mod/go.sum are out of sync with the module graph."
+            echo "If deps/go-llama.cpp drifted, check GO_LLAMA_COMMIT in the Makefile."
+            echo "Otherwise run 'go mod tidy' locally and commit the result."
+            exit 1
+          fi
       - run: go vet ./...
 
   test-go:
