@@ -38,6 +38,16 @@ setup-llm:
 		git checkout --quiet --detach $(GO_LLAMA_COMMIT); \
 		rm -f libbinding.a; \
 	fi
+# Pinning HEAD is not enough: this tree is a real checkout, so a stray
+# "go mod tidy" run inside deps/ silently rewrites its go.mod and changes the
+# module graph our root go.sum is tidied against. CI checks out pristine files
+# and then disagrees. Tracked files are restored on every run; build outputs
+# are gitignored, so libbinding.a survives.
+	@cd deps/go-llama.cpp && \
+	if ! git diff --quiet HEAD 2>/dev/null; then \
+		echo "Restoring pinned sources in deps/go-llama.cpp (local edits discarded)..."; \
+		git checkout --quiet --force -- .; \
+	fi
 	@cd deps/go-llama.cpp && git submodule update --init --recursive --quiet
 	@if [ ! -f deps/go-llama.cpp/libbinding.a ]; then \
 		echo "Building llama.cpp (Metal)..."; \
