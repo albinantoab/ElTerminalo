@@ -47,29 +47,57 @@
    git commit -m "chore: version bump to 1.2.0"
    ```
 
-3. **Run the release build:**
+3. **Set up notarization credentials — once, ever.** Releases are signed *and*
+   notarized; the build refuses to produce artifacts without this. Store an
+   app-specific password in the keychain so you never type it again:
    ```bash
-   make release
+   xcrun notarytool store-credentials "elterminalo" \
+     --apple-id you@example.com \
+     --team-id XXXXXXXXXX \
+     --password abcd-efgh-ijkl-mnop
+   ```
+   Create the app-specific password at [appleid.apple.com](https://appleid.apple.com)
+   → Sign-In and Security → App-Specific Passwords. The team ID is on
+   [developer.apple.com](https://developer.apple.com/account) under Membership.
+
+4. **Run the release build:**
+   ```bash
+   NOTARIZE_KEYCHAIN_PROFILE=elterminalo make release
    # or with an explicit version:
-   # ./scripts/release.sh 1.2.0
+   # NOTARIZE_KEYCHAIN_PROFILE=elterminalo ./scripts/release.sh 1.2.0
    ```
    This will:
+   - Validate credentials and tooling *before* building, so mistakes fail in seconds
+   - Clean `build/bin` and `release/` (a stale bundle must never be republished)
    - Build the app with Wails (version baked into the binary via ldflags)
-   - Update `Info.plist` with the version
-   - Code sign the `.app` bundle
-   - Create a `.dmg` installer and a `.zip` (used by the auto-updater)
+   - Update `Info.plist` and verify the six `NS*UsageDescription` privacy strings
+   - Code sign the `.app` with Developer ID + Hardened Runtime, then verify entitlements
+   - **Notarize and staple** the app, requiring an `Accepted` status from Apple
+   - Create a `.dmg` (also notarized and stapled) and a `.zip` for the auto-updater
+   - Re-verify the *packaged* artifacts: signature, stapled ticket, and Gatekeeper
    - Generate SHA-256 checksums
+
+   Every step is a hard failure. If the script completes, the artifacts are
+   publishable; if it stops, nothing in `release/` should be uploaded.
+
+   > **Never paste credentials from a notes app, a doc, or a chat window.**
+   > Smart quotes (`“ ”`) survive as literal bytes inside the value and silently
+   > corrupt it. The script rejects non-ASCII credentials for this reason.
+
+   For local testing only, `ALLOW_ADHOC_SIGN=1 make release` produces artifacts
+   named `-ADHOC-DO-NOT-DISTRIBUTE`. Ad-hoc signatures cannot be notarized, and
+   macOS will not hold their folder-access grants — never publish one.
 
    Artifacts are written to the `release/` directory.
 
-4. **Tag the release and push:**
+5. **Tag the release and push:**
    ```bash
    git tag v1.2.0
    git push origin main
    git push origin v1.2.0
    ```
 
-5. **Create the GitHub release:**
+6. **Create the GitHub release:**
    ```bash
    gh release create v1.2.0 \
      release/ElTerminalo-1.2.0-macos-arm64.dmg \
