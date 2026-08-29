@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/albinanto/elterminalo/internal/commands"
@@ -29,14 +30,40 @@ var Version = "dev"
 // App is the main Wails-bound application struct.
 const llmIdleTimeout = 5 * time.Minute
 
+// saveAndQuitTimeout bounds how long we wait for the frontend to persist its
+// layout after "app:save-and-quit" before quitting anyway. A hung or crashed
+// webview must never be able to make the app unquittable — Force Quit skips
+// shutdown() entirely, which is how window geometry and up to a full autosave
+// interval of layout changes used to get lost.
+const saveAndQuitTimeout = 2 * time.Second
+
+// saveAndQuitEvent asks the frontend to flush its layout and then call
+// ConfirmQuit. The frontend contract depends on this exact name.
+const saveAndQuitEvent = "app:save-and-quit"
+
+// Labels for the native "still running" confirmation. MessageDialog matches
+// DefaultButton/CancelButton against the button titles by string equality, so
+// these constants have to be the values passed in both places.
+const (
+	quitButtonLabel   = "Quit"
+	cancelButtonLabel = "Cancel"
+)
+
 type App struct {
-	ctx            context.Context
-	ptyMgr         *ptymanager.Manager
-	shell          string
-	cfg            *config.Config
-	cmds           *commands.Store
-	dropDir        string
-	closeConfirmed bool
+	ctx     context.Context
+	ptyMgr  *ptymanager.Manager
+	shell   string
+	cfg     *config.Config
+	cmds    *commands.Store
+	dropDir string
+	// closeConfirmed is written from the quit timer / a binding goroutine and
+	// read by beforeClose on whichever goroutine Wails runs it on, so it has to
+	// be atomic rather than a plain bool.
+	closeConfirmed atomic.Bool
+	// quitPending marks a confirmation dialog or a save handshake as already in
+	// flight, so a second Cmd-Q cannot stack a second dialog or a second timer.
+	quitPending    atomic.Bool
+	quitOnce       sync.Once
 	llmEngine      *llm.Engine
 	llmMu          sync.Mutex
 	llmIdleTimer   *time.Timer
@@ -89,19 +116,100 @@ func (a *App) startup(ctx context.Context) {
 	}
 }
 
+// beforeClose runs on every quit attempt (Cmd-Q, the window close button, and
+// the re-entrant call wailsRuntime.Quit makes). It confirms with the user
+// natively — not through the webview, which may be hung — then gives the
+// frontend a bounded window to save its layout before the app goes down.
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
-	if a.closeConfirmed {
-		return false // allow close
+	if a.closeConfirmed.Load() {
+		return false // committed: let Wails tear down and run shutdown()
 	}
-	// Ask the frontend to show a confirmation dialog
-	wailsRuntime.EventsEmit(ctx, "app:confirm-close")
-	return true // prevent close for now
+
+	// A second Cmd-Q while the first is still being decided must be a no-op,
+	// not another dialog and another fallback timer.
+	if !a.quitPending.CompareAndSwap(false, true) {
+		return true
+	}
+
+	// quitPending set with no fallback timer armed is the one state that makes
+	// the app unquittable: every later Cmd-Q takes the CompareAndSwap branch
+	// above and returns without arming anything. So the flag is cleared on
+	// every way out of here except the one that arms the timer — the Cancel
+	// branch, an unexpected result, a panic in the dialog. (A dialog that never
+	// returns at all blocks this call and is beyond in-process rescue; what is
+	// guaranteed is that no completed beforeClose leaves the trap set.)
+	handshakeStarted := false
+	defer func() {
+		if !handshakeStarted {
+			a.quitPending.Store(false)
+		}
+	}()
+
+	// Only interrupt the user when quitting would actually kill something.
+	if running := a.ptyMgr.RunningCommandCount(); running > 0 && !a.confirmQuitWithUser(ctx, running) {
+		return true // the user stayed; the deferred clear re-arms the next Cmd-Q
+	}
+
+	// Hand off to the frontend to persist its layout, but never depend on it:
+	// whichever of ConfirmQuit or this timer arrives first commits the quit.
+	wailsRuntime.EventsEmit(ctx, saveAndQuitEvent)
+	time.AfterFunc(saveAndQuitTimeout, a.commitQuit)
+	handshakeStarted = true
+
+	// Prevent this close; the committed one comes back through beforeClose and
+	// takes the closeConfirmed branch above.
+	return true
 }
 
-// ConfirmQuit is called by the frontend after the user confirms they want to quit.
+// confirmQuitWithUser shows the native "commands still running" alert and
+// reports whether the user chose to quit. A dialog that fails to display is
+// treated as a Quit: an unquittable app is far worse than a lost confirmation.
+func (a *App) confirmQuitWithUser(ctx context.Context, running int) bool {
+	message := fmt.Sprintf("%d commands are still running and will be terminated.", running)
+	if running == 1 {
+		message = "1 command is still running and will be terminated."
+	}
+
+	choice, err := wailsRuntime.MessageDialog(ctx, wailsRuntime.MessageDialogOptions{
+		Type:    wailsRuntime.QuestionDialog,
+		Title:   "Quit El Terminalo?",
+		Message: message,
+		Buttons: []string{quitButtonLabel, cancelButtonLabel},
+		// Wails checks DefaultButton before CancelButton when assigning key
+		// equivalents, so naming Cancel as both makes Return dismiss the alert
+		// safely instead of terminating the user's commands. Its else-if means
+		// a button can have Return or Escape but never both: Escape therefore
+		// does not dismiss this dialog. Accepted — Return is the key that would
+		// otherwise kill running commands, so it is the one worth claiming.
+		DefaultButton: cancelButtonLabel,
+		CancelButton:  cancelButtonLabel,
+	})
+	if err != nil {
+		return true
+	}
+	// Anything that is not an explicit Cancel counts as a Quit, so an
+	// unexpected empty result can never trap the user in the app.
+	return choice != cancelButtonLabel
+}
+
+// commitQuit performs the real quit exactly once, no matter how many of the
+// handshake, the fallback timer, and a stray ConfirmQuit reach it.
+func (a *App) commitQuit() {
+	a.quitOnce.Do(func() {
+		// Must be set before Quit: Wails re-enters beforeClose from there, and
+		// that call has to see the confirmation and allow the close through.
+		a.closeConfirmed.Store(true)
+		if a.ctx != nil {
+			wailsRuntime.Quit(a.ctx)
+		}
+	})
+}
+
+// ConfirmQuit is called by the frontend once it has finished saving its layout,
+// completing the handshake beforeClose started. Calling it with no handshake
+// pending still quits cleanly.
 func (a *App) ConfirmQuit() {
-	a.closeConfirmed = true
-	wailsRuntime.Quit(a.ctx)
+	a.commitQuit()
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -146,6 +254,17 @@ func (a *App) CreateSession(cols, rows int, cwd string) (string, error) {
 		rows = 24
 	}
 	return a.ptyMgr.CreateSession(cols, rows, cwd)
+}
+
+// SessionExists reports whether a PTY session is still alive.
+//
+// Lets the frontend detect a shell that exited before it could subscribe to
+// pty:exit; Wails events are not replayed. The manager removes a session from
+// its map before emitting that event, so a false here means the exit has
+// already fired — missed, if the pane never saw it — and the frontend can
+// synthesize one rather than leave a silently dead pane on screen.
+func (a *App) SessionExists(sessionID string) bool {
+	return a.ptyMgr.HasSession(sessionID)
 }
 
 // GetSessionCWD returns the current working directory of a session.
@@ -241,6 +360,25 @@ func (a *App) SaveAppState(stateJSON string) error {
 // LoadAppState reads the saved state JSON from disk.
 func (a *App) LoadAppState() string {
 	return a.cfg.LoadState()
+}
+
+// QuarantineAppState moves the saved layout aside and returns the path it was
+// moved to — "" when there was nothing to move or the move failed.
+//
+// The frontend calls this when a saved layout parsed as JSON but could not be
+// rebuilt into panes, because the fresh single-tab layout it falls back to gets
+// saved straight over the real one otherwise. The backup is no help there: the
+// file is valid JSON, so LoadState hands it back rather than falling back, and
+// the first save after the fallback rotates the last good copy out of .bak.
+// Renaming the file means the next save starts a fresh one while the layout
+// that could not be rebuilt survives on disk for manual recovery.
+func (a *App) QuarantineAppState() string {
+	path, err := a.cfg.QuarantineState()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot quarantine state: %v\n", err)
+		return ""
+	}
+	return path
 }
 
 // GetGlobalCommands reads commands from the global commands file.

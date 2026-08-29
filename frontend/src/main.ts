@@ -14,6 +14,7 @@ import {
   DEFAULT_SPLIT_RATIO, SPATIAL_NAV_THRESHOLD, STATE_SAVE_INTERVAL_MS, CMD,
 } from './constants';
 import './types/wails.d.ts';
+import type { PtyExitPayload } from './types/wails.d.ts';
 
 const ICON_CPU =
   '<svg class="status-stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -56,6 +57,13 @@ class ElTerminalo {
   private aiGenerating = false;
   private aiPrompts = new Set<string>();
   private modelUpdateAvailable = false;
+  // Set for the whole of restoreState(). Every save path consults it, because
+  // a save taken while the layout is half rebuilt would overwrite the real one.
+  private restoring = false;
+  // Where a structurally broken state file was moved to, so the fallback tab
+  // can tell the user their layout wasn't lost, only set aside. '' when the
+  // restore went fine or there was nothing to quarantine.
+  private quarantinedStatePath = '';
 
   private stateSaveInterval: ReturnType<typeof setInterval> | null = null;
   private updateCheckInterval: ReturnType<typeof setInterval> | null = null;
@@ -168,6 +176,7 @@ class ElTerminalo {
       getTabs: () => this.tabs,
       getActiveTabIndex: () => this.activeTabIndex,
       getCurrentThemeName: () => this.currentTheme.name,
+      isRestoring: () => this.restoring,
     });
 
     // Needed before any pane connects: OSC 7 reports are filtered by host.
@@ -186,6 +195,8 @@ class ElTerminalo {
     if (!restored) {
       applyThemeToCSS(this.currentTheme);
       await this.createTab('Terminalo 1');
+      // Only now is there a terminal to say it in.
+      this.reportQuarantinedState();
     }
 
     this.switchToTab(this.activeTabIndex);
@@ -223,8 +234,20 @@ class ElTerminalo {
     this.pollSystemStats();
     this.statsInterval = setInterval(() => this.pollSystemStats(), 3000);
 
-    // Listen for close confirmation request from the Go backend
-    window.runtime.EventsOn('app:confirm-close', () => this.showCloseConfirmation());
+    // Quitting is a handshake: Go puts up the native confirmation dialog itself
+    // and, once the user agrees, asks us to persist the layout. It quits on
+    // ConfirmQuit or after its own 2s fallback, so this must stay quick and must
+    // never bail out — a failed save is not a reason to refuse to quit.
+    window.runtime.EventsOn('app:save-and-quit', async () => {
+      try {
+        await this.stateManager.save();
+      } catch (e) {
+        console.error('Failed to save state before quit:', e);
+      }
+      // Also a promise: nothing left to do if it rejects, but an unhandled
+      // rejection is not how this handler should end.
+      window.go.main.App.ConfirmQuit().catch(() => {});
+    });
 
     // Handle file drops — read via HTML5 API, save to temp via Go
     document.addEventListener('dragover', (e) => e.preventDefault(), true);
@@ -246,9 +269,11 @@ class ElTerminalo {
           if (path) paths.push(path);
         } catch { /* skip failed files */ }
       }
-      if (paths.length > 0) {
+      // Re-checked: reading the files and staging them took time, and the shell
+      // may have exited in the meantime.
+      if (paths.length > 0 && ap.pane.sessionId) {
         const escaped = paths.map(p => this.shellEscape(p)).join(' ');
-        window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(escaped + ' '));
+        window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(escaped + ' ')).catch(() => {});
       }
     }, true);
   }
@@ -397,7 +422,14 @@ class ElTerminalo {
     this.renderLayout();
     await waitForLayout();
     pane.pane.fit();
-    await pane.pane.connect();
+    // A shell that won't start leaves a pane that says so and retries on Enter,
+    // rather than rejecting out of here — this also runs during init().
+    try {
+      await pane.pane.connect();
+    } catch (e) {
+      console.error('Failed to start shell for new tab:', e);
+      pane.pane.showStartFailure(e);
+    }
     this.setActive(0);
     this.stateManager.save();
   }
@@ -405,17 +437,33 @@ class ElTerminalo {
   private closeTab(index: number): void {
     if (this.tabs.length <= 1) return;
 
+    const wasVisible = index === this.activeTabIndex;
     const tab = this.tabs[index];
     for (const p of tab.panes) {
       p.pane.dispose();
     }
     this.tabs.splice(index, 1);
 
+    // Closing a tab to the left of the active one shifts it down. Without this
+    // the window would land on a different tab than the user was working in —
+    // reachable from the tab bar's × and now from a background pane exiting.
+    if (index < this.activeTabIndex) this.activeTabIndex--;
     if (this.activeTabIndex >= this.tabs.length) {
       this.activeTabIndex = this.tabs.length - 1;
     }
 
-    this.switchToTab(this.activeTabIndex);
+    if (wasVisible) {
+      // The tab on screen is the one that went: the window has to be redrawn
+      // around whatever took its place.
+      this.switchToTab(this.activeTabIndex);
+    } else {
+      // A background tab closing — the tab bar's × on another tab, or a shell
+      // there exiting on its own — must leave the visible tab alone. A
+      // renderLayout() would tear its DOM down and rebuild it, dropping the
+      // user's selection, and setActive() would yank focus back out of
+      // whatever they were doing.
+      this.renderTabBar();
+    }
     this.stateManager.save();
   }
 
@@ -520,6 +568,8 @@ class ElTerminalo {
     const state = await this.stateManager.load();
     if (!state) return false;
 
+    // Nothing may be saved until the window is whole again.
+    this.restoring = true;
     try {
       if (!state.tabs && state.layout) {
         // v1 migration: single layout -> single tab
@@ -550,6 +600,8 @@ class ElTerminalo {
           layoutRoot: null,
         };
         this.tabs.push(tab);
+        // Per-leaf failures are absorbed below, so one unreadable directory
+        // can't take the rest of the layout down with it.
         tab.layoutRoot = await this.restoreLayoutNode(savedTab.layout, tab);
       }
 
@@ -559,28 +611,61 @@ class ElTerminalo {
       await waitForLayout();
       for (const p of this.tab.panes) p.pane.fit();
 
+      // Deliberately no save here: nothing changed from the user's point of
+      // view, and the 30s autosave starts once init() is past this.
       return true;
     } catch (e) {
       console.error('Failed to restore state:', e);
+      // Leave nothing half-built behind — init() falls back to a fresh tab.
+      for (const t of this.tabs) for (const p of t.panes) p.pane.dispose();
+      this.tabs = [];
+      this.activeTabIndex = 0;
+      // The file on disk is structurally unusable. Move it aside *before*
+      // returning: the fresh tab init() is about to build saves itself, and
+      // that save must land on a new file rather than overwrite the layout the
+      // user actually had. Best-effort — an unquarantined file is still better
+      // than refusing to start.
+      try {
+        this.quarantinedStatePath = await window.go.main.App.QuarantineAppState();
+      } catch (qe) {
+        console.error('Failed to quarantine unreadable state:', qe);
+      }
       return false;
+    } finally {
+      this.restoring = false;
     }
   }
 
-  private async restoreLayoutNode(saved: SavedSplitNode, tab: Tab): Promise<SplitNode> {
-    if (saved.type === 'leaf') {
-      const pane = await this.createPaneForTab(tab);
-      await pane.pane.connect(saved.cwd || '');
-      return { type: 'leaf', paneInfo: pane };
-    }
-    if (saved.type === 'split' && saved.children) {
+  /** Say, in the fallback tab's terminal, that the old layout was set aside —
+   *  a silent reset looks like the app forgot everything. */
+  private reportQuarantinedState(): void {
+    const path = this.quarantinedStatePath;
+    this.quarantinedStatePath = '';
+    if (!path) return;
+    const pane = this.panes[this.activeIndex] || this.panes[0];
+    pane?.pane.writeNotice(`[Previous layout could not be restored; it was saved as ${path}]`);
+  }
+
+  private async restoreLayoutNode(saved: SavedSplitNode | undefined, tab: Tab): Promise<SplitNode> {
+    if (saved?.type === 'split' && saved.children) {
       const [first, second] = await Promise.all([
         this.restoreLayoutNode(saved.children[0], tab),
         this.restoreLayoutNode(saved.children[1], tab),
       ]);
       return { type: 'split', direction: saved.direction, ratio: saved.ratio ?? DEFAULT_SPLIT_RATIO, children: [first, second] };
     }
+    // A leaf — and anything malformed, including a node that isn't there at all
+    // — is one pane, so one bad entry costs a split, not the whole restore. A
+    // shell that refuses to start still gets its pane: it keeps the saved
+    // directory (so the next save persists the folder, not ""), says why, and
+    // Enter retries.
     const pane = await this.createPaneForTab(tab);
-    await pane.pane.connect();
+    try {
+      await pane.pane.connect(saved?.cwd || '');
+    } catch (e) {
+      console.error('Failed to start shell for restored pane:', e);
+      pane.pane.showStartFailure(e);
+    }
     return { type: 'leaf', paneInfo: pane };
   }
 
@@ -600,6 +685,8 @@ class ElTerminalo {
       splitHorizontal: () => this.splitPane('horizontal'),
       closePane: () => this.confirmCloseActivePane(),
     });
+
+    pane.onExit = (exit) => this.handlePaneExit(info, exit);
 
     pane.smartRender.onBadgesChanged = () => this.renderStatusBar();
 
@@ -664,7 +751,12 @@ class ElTerminalo {
     this.renderLayout();
     await waitForLayout();
     this.fitAll();
-    await newPane.pane.connect();
+    try {
+      await newPane.pane.connect();
+    } catch (e) {
+      console.error('Failed to start shell for new pane:', e);
+      newPane.pane.showStartFailure(e);
+    }
     this.setActive(this.panes.indexOf(newPane));
     this.stateManager.save();
   }
@@ -696,40 +788,92 @@ class ElTerminalo {
 
   private confirmCloseActivePane(): void {
     if (this.panes.length <= 1 || !this.layoutRoot) return;
-    this.showConfirmDialog('Close Pane?', 'The active pane and its session will be closed.', 'Close', () => this.closeActivePane());
+    // The pane the user is being asked about, not "whichever is active when
+    // they answer": a shell exiting anywhere while the dialog is up can close
+    // panes and tabs on its own, moving the active one out from under it.
+    const target = this.panes[this.activeIndex];
+    if (!target) return;
+    this.showConfirmDialog('Close Pane?', 'The active pane and its session will be closed.', 'Close', () => {
+      const tab = this.tabs.find(t => t.panes.includes(target));
+      // Gone already — its own shell exited while the dialog was open. And a
+      // pane that has since become its tab's last one can only go by taking
+      // the tab with it, which is more than this dialog asked for.
+      if (!tab || tab.panes.length <= 1) return;
+      this.closePane(target);
+    });
   }
 
   private confirmCloseTab(index: number): void {
     if (this.tabs.length <= 1) return;
-    const paneCount = this.tabs[index]?.panes.length ?? 0;
-    this.showConfirmDialog('Close Tab?', `${paneCount} pane${paneCount !== 1 ? 's' : ''} in this tab will be closed.`, 'Close', () => this.closeTab(index));
+    // Same reason, one level up: a background pane's shell exiting closes its
+    // tab, so by the time the user confirms, this index can name a different
+    // tab — or none at all. Re-resolve the captured tab instead.
+    const tab = this.tabs[index];
+    if (!tab) return;
+    const paneCount = tab.panes.length;
+    this.showConfirmDialog('Close Tab?', `${paneCount} pane${paneCount !== 1 ? 's' : ''} in this tab will be closed.`, 'Close', () => {
+      const idx = this.tabs.indexOf(tab);
+      if (idx < 0) return;
+      this.closeTab(idx);
+    });
   }
 
-  private closeActivePane(): void {
-    if (this.panes.length <= 1 || !this.layoutRoot) return;
-    const activePane = this.panes[this.activeIndex];
-    if (!activePane) return;
+  /** Close one pane, wherever it lives — the active tab or a background one.
+   *  Returns false when the pane can't go: the app must always keep at least
+   *  one pane, so the last pane of the last tab stays put. */
+  private closePane(target: PaneInfo): boolean {
+    const tabIndex = this.tabs.findIndex(t => t.panes.includes(target));
+    if (tabIndex < 0) return false;
+    const tab = this.tabs[tabIndex];
 
-    const result = this.findParent(this.layoutRoot, activePane.id);
-    if (result) {
-      const sibling = result.parent.children![result.childIndex === 0 ? 1 : 0];
-      result.parent.type = sibling.type;
-      result.parent.direction = sibling.direction;
-      result.parent.ratio = sibling.ratio;
-      result.parent.paneInfo = sibling.paneInfo;
-      result.parent.children = sibling.children;
+    // A pane that is its whole tab can only go by taking the tab with it.
+    if (tab.panes.length <= 1) {
+      if (this.tabs.length <= 1) return false;
+      this.closeTab(tabIndex);
+      return true;
     }
 
-    const removedIdx = this.panes.indexOf(activePane);
-    this.panes.splice(removedIdx, 1);
-    activePane.pane.dispose();
+    if (!tab.layoutRoot) return false;
+    const result = this.findParent(tab.layoutRoot, target.id);
+    // Without a parent the tree and the pane list disagree; removing one side
+    // only would leave the layout pointing at a disposed pane.
+    if (!result) return false;
 
-    if (this.activeIndex >= this.panes.length) this.activeIndex = this.panes.length - 1;
+    const sibling = result.parent.children![result.childIndex === 0 ? 1 : 0];
+    result.parent.type = sibling.type;
+    result.parent.direction = sibling.direction;
+    result.parent.ratio = sibling.ratio;
+    result.parent.paneInfo = sibling.paneInfo;
+    result.parent.children = sibling.children;
 
-    this.renderLayout();
-    requestAnimationFrame(() => this.fitAll());
-    this.setActive(this.activeIndex);
+    const removedIdx = tab.panes.indexOf(target);
+    tab.panes.splice(removedIdx, 1);
+    target.pane.dispose();
+
+    // Keep the focus where it was: everything after the hole shifts down one.
+    if (removedIdx < tab.activeIndex) tab.activeIndex--;
+    if (tab.activeIndex >= tab.panes.length) tab.activeIndex = tab.panes.length - 1;
+    if (tab.activeIndex < 0) tab.activeIndex = 0;
+
+    // Background tabs aren't in the DOM; switchToTab redraws them on return.
+    if (tabIndex === this.activeTabIndex) {
+      this.renderLayout();
+      requestAnimationFrame(() => this.fitAll());
+      this.setActive(tab.activeIndex);
+    }
     this.stateManager.save();
+    return true;
+  }
+
+  /** A pane's shell exited. A clean `exit` means the user is done with the pane,
+   *  so it goes; anything else is a failure they should see, so the pane stays
+   *  with the reason on screen and Enter to restart it. */
+  private handlePaneExit(info: PaneInfo, exit: PtyExitPayload): void {
+    const clean = exit.exitCode === 0 && exit.signal === '';
+    // Mid-restore the layout isn't assembled yet, so nothing may be
+    // restructured — the pane just says what happened and waits for Enter.
+    if (clean && !this.restoring && this.closePane(info)) return;
+    info.pane.showExitNotice(exit);
   }
 
   private renderLayout(): void {
@@ -869,43 +1013,6 @@ class ElTerminalo {
       });
     }
 
-  }
-
-  private showCloseConfirmation(): void {
-    // Don't stack multiple dialogs
-    if (document.querySelector('.close-overlay')) return;
-
-    const activeSessions = this.tabs.reduce((n, t) => n + t.panes.length, 0);
-
-    const overlay = document.createElement('div');
-    overlay.className = 'update-overlay close-overlay';
-    overlay.innerHTML = `<div class="update-dialog">
-      <div class="update-dialog-title">Quit El Terminalo?</div>
-      <div class="update-dialog-body">
-        ${activeSessions} active session${activeSessions !== 1 ? 's' : ''} will be terminated.
-      </div>
-      <div class="update-dialog-actions">
-        <button class="theme-btn theme-btn-cancel" id="close-cancel">Cancel</button>
-        <button class="theme-btn theme-btn-save" id="close-confirm" style="background:#f85149;border-color:#f85149;">Quit</button>
-      </div>
-    </div>`;
-    document.body.appendChild(overlay);
-
-    const dismiss = () => overlay.remove();
-
-    document.getElementById('close-cancel')?.addEventListener('click', dismiss);
-    document.getElementById('close-confirm')?.addEventListener('click', () => {
-      this.stateManager.save();
-      window.go.main.App.ConfirmQuit();
-    });
-
-    // Allow Escape to cancel
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { dismiss(); document.removeEventListener('keydown', onKey, true); }
-      if (e.key === 'Enter') { this.stateManager.save(); window.go.main.App.ConfirmQuit(); }
-      e.stopPropagation();
-    };
-    document.addEventListener('keydown', onKey, true);
   }
 
   private async promptUpdate(): Promise<void> {
@@ -1061,8 +1168,11 @@ class ElTerminalo {
     const ap = this.panes[this.activeIndex];
     if (!ap) return;
     ap.pane.clear();
-    // Send Ctrl+L to the shell so it redraws the full prompt
-    window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('\x0c'));
+    // Send Ctrl+L to the shell so it redraws the full prompt — a dead pane has
+    // no shell to ask, and writing to it would just reject.
+    if (ap.pane.sessionId) {
+      window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('\x0c')).catch(() => {});
+    }
   }
 
   // --- AI Command (Cmd+K) ---
@@ -1099,23 +1209,33 @@ class ElTerminalo {
       }
     }
 
+    // The shell can exit while the model is downloading or loading. There is
+    // nowhere to put an answer then, so don't spend a generation on it.
+    if (!ap.pane.sessionId) {
+      this.aiPrompts.delete(query.trim());
+      return;
+    }
+
     // Show generating state — rotating border + status bar
     this.setAILoading(true);
 
     // Clear current line (Ctrl+U clears everything before cursor in most shells)
-    window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('\x15'));
+    window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64('\x15')).catch(() => {});
 
     try {
       const cwd = await ap.pane.getCWD();
       const command = await window.go.main.App.AskAI(query, cwd);
 
-      // Write the generated command WITHOUT executing (no newline)
-      if (command) {
-        window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(command));
+      // Write the generated command WITHOUT executing (no newline). Generation
+      // is slow enough that the shell may be gone by the time it lands.
+      if (command && ap.pane.sessionId) {
+        window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(command)).catch(() => {});
       }
     } catch (err) {
       // Write a comment so the user sees what happened without accidentally executing the prompt
-      window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(`# AI failed: ${query}`));
+      if (ap.pane.sessionId) {
+        window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(`# AI failed: ${query}`)).catch(() => {});
+      }
       console.error('AI generation failed:', err);
     }
 
@@ -1274,23 +1394,21 @@ class ElTerminalo {
           if (c.shortcut && c.shortcut.toLowerCase() === pressed.toLowerCase()) {
             e.preventDefault(); e.stopImmediatePropagation();
             const ap = this.panes[this.activeIndex];
-            if (ap) {
-              const data = c.command.includes('\n')
-                ? '\x1b[200~' + c.command + '\x1b[201~\n'
-                : c.command + '\n';
-              window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(data));
-            }
+            // A pane whose shell has exited has nothing to run the command in;
+            // the shortcut is still swallowed, exactly as when it does run.
+            if (!ap?.pane.sessionId) return;
+            const data = c.command.includes('\n')
+              ? '\x1b[200~' + c.command + '\x1b[201~\n'
+              : c.command + '\n';
+            window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(data)).catch(() => {});
             return;
           }
         }
       }
     }
 
-    // Block Ctrl+L so it doesn't clear via the shell — only Cmd+L should clear
-    if (e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'l') {
-      e.preventDefault();
-      return;
-    }
+    // Ctrl+L is not intercepted: vim, less, tmux and Claude Code all bind it,
+    // so it belongs to the foreground program. Cmd+L is this app's own clear.
 
     // Built-in shortcuts (Cmd-based)
     if (isMeta) {

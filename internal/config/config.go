@@ -1,15 +1,60 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
+)
+
+const (
+	stateFileName = "state.json"
+	// bakSuffix names the single rotated copy of the last state.json that
+	// parsed. Only one generation is kept: it exists to survive a torn write,
+	// not to provide history.
+	bakSuffix = ".bak"
+	// corruptPrefix is joined with a unix timestamp to quarantine an
+	// unparseable state.json. The file is never deleted — a user who lost a
+	// large layout can still pick it apart by hand.
+	corruptPrefix = ".corrupt-"
+	// failedPrefix is joined with a unix timestamp to move aside a state.json
+	// that parsed but that the frontend could not rebuild into a layout. It is
+	// deliberately distinct from corruptPrefix so the two failure modes stay
+	// tellable apart by anyone digging through the config directory.
+	failedPrefix = ".failed-"
+	// statePerm is the mode every file this package publishes is written with.
+	// These hold tab names and the working directory of each pane — the user's
+	// project paths — so they are owner-only. The mode is named explicitly at
+	// each call site because writeFileDurable applies it with Chmod, which the
+	// umask does not filter: a 0644 there really is world-readable, rather than
+	// whatever the umask would have made of it. Files left at 0644 by an older
+	// version are tightened by the next save, which renames a fresh inode over
+	// them.
+	statePerm = 0o600
+	// tempSuffix is the scratch-name suffix writeFileDurable hands to
+	// os.CreateTemp, where "*" is the random part it substitutes. It doubles as
+	// the tail of sweepTempFiles' glob, where the same "*" matches that random
+	// part — one constant so renaming the scratch files cannot leave the sweep
+	// looking for names nothing is called any more.
+	tempSuffix = ".tmp-*"
+	// quarantineAttempts bounds how many names QuarantineState tries before it
+	// gives up: the timestamped one plus quarantineAttempts-1 numbered variants.
+	quarantineAttempts = 100
 )
 
 // Config manages the application's configuration directory and state persistence.
 type Config struct {
 	dir string
+	// mu serializes every path that writes into the config directory. Wails
+	// dispatches each binding call on its own goroutine, so the 30s autosave
+	// can overlap a save triggered by a divider drag or by Cmd-Q — and each
+	// save is a read-rotate-write cycle, not a single atomic step. Without this
+	// lock two of them interleave and the loser's bytes end up spliced into the
+	// file the survivor publishes.
+	mu sync.Mutex
 }
 
 // New creates a Config, determining and creating the config directory once.
@@ -22,7 +67,38 @@ func New() (*Config, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("cannot create config directory: %w", err)
 	}
+	sweepTempFiles(dir)
 	return &Config{dir: dir}, nil
+}
+
+// sweepTempFiles deletes writeFileDurable's scratch files from dir.
+//
+// A crash between the CreateTemp and the rename — a panic, a kill -9, a power
+// loss — leaves a state.json.tmp-<random> behind, and nothing ever comes back
+// for it, so they accumulate for the life of the install. Startup is the one
+// moment this is safe to do wholesale: this process is the only writer of those
+// names and it has not written any yet, so every match is debris from a run
+// that is already over. Failures are ignored — a file that cannot be removed is
+// litter, not a reason to refuse to start.
+func sweepTempFiles(dir string) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*"+tempSuffix))
+	if err != nil {
+		return
+	}
+	for _, path := range matches {
+		// Only ever unlink a plain file: the pattern is broad enough to catch a
+		// directory somebody put here, and this is the user's config directory.
+		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		_ = os.Remove(path)
+	}
+}
+
+// newWithDir builds a Config rooted at an already-existing directory. Only the
+// tests use it; production code goes through New so the directory is created.
+func newWithDir(dir string) *Config {
+	return &Config{dir: dir}
 }
 
 // Dir returns the configuration directory path.
@@ -30,24 +106,209 @@ func (c *Config) Dir() string {
 	return c.dir
 }
 
-// SaveState writes the serialized state JSON to disk atomically.
-func (c *Config) SaveState(stateJSON string) error {
-	path := filepath.Join(c.dir, "state.json")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(stateJSON), 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+func (c *Config) statePath() string {
+	return filepath.Join(c.dir, stateFileName)
 }
 
-// LoadState reads the saved state JSON from disk.
-func (c *Config) LoadState() string {
-	data, err := os.ReadFile(filepath.Join(c.dir, "state.json"))
+// writeFileDurable writes data to path via a temp file that is fsync'd before
+// the rename. Without the fsync a crash can leave the rename committed while
+// the data is still only in the page cache, which is exactly how a power loss
+// turns a saved layout into a zero-length file. The containing directory is
+// fsync'd afterwards so the rename entry itself is on disk.
+//
+// The temp file gets a unique name per call. A fixed path+".tmp" would be
+// shared by two concurrent writers: both truncate and write the same inode,
+// both fsync it, and both rename it, so the survivor publishes a byte-level
+// splice of the two payloads rather than either one of them. Config.mu already
+// serializes the callers here, but the unique name means even a caller that
+// bypasses the lock can only lose a whole write, never corrupt the file.
+//
+// perm is applied literally. os.WriteFile passes its mode to open(2), where the
+// umask filters it; a Chmod is not filtered, so callers get exactly the bits
+// they name — see statePerm.
+func writeFileDurable(path string, data []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+tempSuffix)
 	if err != nil {
-		return ""
+		return err
 	}
-	var check json.RawMessage
-	if json.Unmarshal(data, &check) != nil {
+	tmp := f.Name()
+	// CreateTemp always opens with 0600; the published file has to carry the
+	// caller's mode instead, and setting it before the rename means the file is
+	// never visible at the final path with the wrong permissions.
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	syncDir(filepath.Dir(path))
+	return nil
+}
+
+// syncDir flushes a directory entry so a completed rename survives a power
+// loss. Failures are ignored on purpose: some filesystems refuse to open a
+// directory for writing, and by this point the rename has already succeeded.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
+}
+
+// SaveState writes the serialized state JSON to disk atomically and durably,
+// rotating the previous good copy to state.json.bak first.
+//
+// What the backup does and does not buy: LoadState falls back to it exactly
+// when state.json fails to parse, so it covers a torn or truncated primary and
+// nothing else. A primary that is valid JSON but wrong — the fresh single-tab
+// layout written after a restore that parsed and then failed to rebuild, say —
+// is never recovered from, and the first content-changing save after that
+// rotates the last good copy out of the single backup slot for good.
+// QuarantineState is what covers that case, and only if the caller notices.
+func (c *Config) SaveState(stateJSON string) error {
+	// Read-rotate-write is three separate filesystem steps; two of them
+	// interleaved would rotate one save's bytes under another save's primary.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	path := c.statePath()
+	data := []byte(stateJSON)
+
+	if prev, err := os.ReadFile(path); err == nil {
+		// The autosave rewrites the same bytes most of the time. Rotating on
+		// every one of those would quickly push the only genuinely different
+		// copy out of the single backup slot.
+		if bytes.Equal(prev, data) {
+			return nil
+		}
+		// Only ever promote a file that parses — a corrupt primary must not be
+		// allowed to overwrite a good backup.
+		if json.Valid(prev) {
+			// A failed rotation is not fatal: saving the new state still beats
+			// refusing to save anything.
+			_ = writeFileDurable(path+bakSuffix, prev, statePerm)
+		}
+	}
+
+	return writeFileDurable(path, data, statePerm)
+}
+
+// LoadState reads the saved state JSON from disk. A state.json that exists but
+// does not parse is moved aside instead of being silently replaced by the next
+// save, and the rotated backup is used in its place.
+func (c *Config) LoadState() string {
+	// Takes the write lock too: the quarantine branch below renames the very
+	// file SaveState rotates and rewrites.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	path := c.statePath()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "" // first run: nothing saved yet
+		}
+		// Present but unreadable (permissions, I/O error). Leave it alone and
+		// try the backup rather than reporting "no layout".
+		return c.loadStateBackup()
+	}
+
+	// json.Valid rejects empty and whitespace-only files too, which is what a
+	// power loss during the old non-fsync'd write used to leave behind.
+	if json.Valid(data) {
+		return string(data)
+	}
+
+	// Quarantine rather than delete: the next save would otherwise destroy the
+	// only remaining trace of the layout.
+	quarantine := fmt.Sprintf("%s%s%d", path, corruptPrefix, time.Now().Unix())
+	if err := os.Rename(path, quarantine); err != nil {
+		// Could not move it aside — still prefer the backup over the garbage.
+		return c.loadStateBackup()
+	}
+	syncDir(c.dir)
+
+	return c.loadStateBackup()
+}
+
+// QuarantineState renames state.json to state.json.failed-<unix> and returns
+// the new path, or ("", nil) when there is no state.json to move.
+//
+// This is the escape hatch for a layout that parsed but could not be rebuilt.
+// LoadState cannot catch that: the file is valid JSON, so it hands it straight
+// back and the backup is never consulted. The caller falls back to a fresh
+// single-tab layout, and its next save would write that over the real one and
+// then rotate the last good copy out of .bak. Moving the file aside means the
+// next save starts a new file while the old layout survives on disk. Nothing
+// is ever deleted here.
+func (c *Config) QuarantineState() (string, error) {
+	// Same lock as SaveState: a save that landed between the stat and the
+	// rename would be quarantined instead of kept.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	path := c.statePath()
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil // nothing saved yet, nothing to move
+		}
+		return "", err
+	}
+
+	base := fmt.Sprintf("%s%s%d", path, failedPrefix, time.Now().Unix())
+	quarantine := base
+	// Two quarantines inside the same second must not clobber each other: the
+	// file being moved is the user's only remaining copy of that layout. Every
+	// candidate is tested, the last one included — the bound is on how many
+	// names are tried, not on how many are checked, so the loop can never fall
+	// out onto a name it never looked at. Exhausting them is not a reason to
+	// overwrite one; it is a reason to leave state.json where it is and say so.
+	for i := 1; fileExists(quarantine); i++ {
+		if i >= quarantineAttempts {
+			return "", fmt.Errorf("cannot quarantine %s: %s and its %d numbered variants all exist",
+				stateFileName, base, quarantineAttempts-1)
+		}
+		quarantine = fmt.Sprintf("%s-%d", base, i)
+	}
+
+	if err := os.Rename(path, quarantine); err != nil {
+		return "", err
+	}
+	syncDir(c.dir)
+
+	return quarantine, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// loadStateBackup returns the rotated backup, or "" if it is missing or is
+// itself unparseable.
+func (c *Config) loadStateBackup() string {
+	data, err := os.ReadFile(c.statePath() + bakSuffix)
+	if err != nil || !json.Valid(data) {
 		return ""
 	}
 	return string(data)
@@ -67,12 +328,12 @@ func (c *Config) SaveWindowGeometry(g WindowGeometry) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(c.dir, "window.json")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// Shares the lock with the state writes: one mutex over the whole config
+	// directory is cheap here — these are user-driven saves, not a hot path —
+	// and it means no future write path can be added without being serialized.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return writeFileDurable(filepath.Join(c.dir, "window.json"), data, statePerm)
 }
 
 // LoadWindowGeometry reads the saved window geometry from disk.

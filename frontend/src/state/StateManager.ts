@@ -5,19 +5,69 @@ export interface StateCallbacks {
   getTabs(): Tab[];
   getActiveTabIndex(): number;
   getCurrentThemeName(): string;
+  /** True while the window is still being rebuilt from disk. */
+  isRestoring(): boolean;
 }
 
 export class StateManager {
   private callbacks: StateCallbacks;
+  // The write currently in flight, or null when idle. A save reads every pane's
+  // cwd first, so it is slow enough that the 30s autosave routinely overlaps a
+  // user-triggered one (divider drag, close pane, the quit handshake); two
+  // SaveAppState calls racing each other can leave a corrupt state.json.
+  private inFlight: Promise<void> | null = null;
+  // The single follow-up write that covers everything asked for while
+  // `inFlight` was running, shared by every caller that asked. Awaiting it
+  // means resolving only once *this* caller's state has reached disk.
+  private queued: Promise<void> | null = null;
 
   constructor(callbacks: StateCallbacks) {
     this.callbacks = callbacks;
   }
 
   async save(): Promise<void> {
-    const tabs = this.callbacks.getTabs();
-    if (tabs.length === 0) return;
+    // Mid-restore the window is only half rebuilt — the tabs and panes still
+    // waiting to be recreated don't exist yet, so writing now would replace the
+    // user's real layout with whatever has been reached so far.
+    if (this.callbacks.isRestoring()) return;
+    if (this.inFlight) {
+      // Coalesce: however many saves are asked for while one is writing, they
+      // are all served by one more pass afterwards.
+      if (!this.queued) {
+        // The catch keeps a hypothetical rejection from stranding `queued`
+        // non-null, which would kill saving for the rest of the session.
+        this.queued = this.inFlight.catch(() => {}).then(() => {
+          this.queued = null;
+          return this.beginWrite();
+        });
+      }
+      return this.queued;
+    }
+    return this.beginWrite();
+  }
+
+  /** Start one write and publish it as the in-flight one. */
+  private beginWrite(): Promise<void> {
+    const p = this.writeState().finally(() => {
+      if (this.inFlight === p) this.inFlight = null;
+    });
+    this.inFlight = p;
+    return p;
+  }
+
+  /** Serialize the window and hand it to the backend. Never rejects: a save
+   *  that fails is logged, because the callers that await it (the quit
+   *  handshake, a rename) must not be blocked by it. */
+  private async writeState(): Promise<void> {
+    // Everything, the host callbacks included, is inside the try: they are the
+    // host's code, so a throw from one of them would break the promise this
+    // method makes to its callers.
     try {
+      // Re-checked here because a coalesced write runs later than the save()
+      // call that asked for it.
+      if (this.callbacks.isRestoring()) return;
+      const tabs = this.callbacks.getTabs();
+      if (tabs.length === 0) return;
       const savedTabs: SavedTab[] = [];
       for (const tab of tabs) {
         const layout = tab.layoutRoot

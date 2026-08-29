@@ -21,12 +21,36 @@ const (
 // ErrSessionNotFound is returned when an operation targets a session that does not exist.
 var ErrSessionNotFound = errors.New("session not found")
 
+// PtyExit is the payload of the pty:exit:<sessionID> event. ExitCode is the
+// shell's own exit status, or -1 when a signal ended it — in which case Signal
+// names the signal and is otherwise empty. Closing a pane produces either shape:
+// zsh catches the hangup and exits 1, while a shell that does not handle it is
+// reported as (-1, "SIGHUP").
+//
+// ExitCode -1 with an empty Signal is the one remaining case: status unknown.
+// Every rung of the shutdown ladder is bounded, so a shell that outlives SIGKILL
+// leaves nothing to report; the frontend renders that as "status unknown" rather
+// than as an exit code or a signal.
+type PtyExit struct {
+	ExitCode int    `json:"exitCode"`
+	Signal   string `json:"signal"`
+}
+
 // SessionStatus describes the current state of a PTY session.
 type SessionStatus struct {
 	SessionID string `json:"sessionId"`
 	CWD       string `json:"cwd"`
 	Command   string `json:"command"`
 	IsIdle    bool   `json:"isIdle"`
+}
+
+// emitEvent publishes a Wails event. It is indirected through a var so the
+// tests can observe what readLoop publishes: the order of the exit event
+// against the session's removal from the map is load-bearing for the frontend
+// (see readLoop), and there is no live Wails runtime in a test to assert it
+// against.
+var emitEvent = func(ctx context.Context, event string, data ...interface{}) {
+	wailsRuntime.EventsEmit(ctx, event, data...)
 }
 
 // Manager manages multiple PTY sessions and streams output via Wails events.
@@ -105,7 +129,7 @@ func (m *Manager) readLoop(session *Session) {
 	flush := func() {
 		if len(accum) > 0 && m.ctx != nil {
 			encoded := base64.StdEncoding.EncodeToString(accum)
-			wailsRuntime.EventsEmit(m.ctx, "pty:output:"+session.ID, encoded)
+			emitEvent(m.ctx, "pty:output:"+session.ID, encoded)
 			accum = accum[:0]
 		}
 	}
@@ -133,18 +157,35 @@ func (m *Manager) readLoop(session *Session) {
 				}
 			}
 			flush()
-			if m.ctx != nil {
-				wailsRuntime.EventsEmit(m.ctx, "pty:exit:"+session.ID, map[string]int{"exitCode": 0})
-			}
 			// Release the PTY fd and reap the child. A shell that exits on its
 			// own (exit/Ctrl-D, SSH drop, crash) would otherwise leak its ptmx
 			// fd and leave a zombie: CloseSession can't recover it once it's
-			// removed from the map below. Close is sync.Once-guarded, so this is
-			// a no-op when an explicit CloseSession already triggered this path.
+			// removed from the map below. Close is sync.Once-guarded, so when an
+			// explicit CloseSession already started the shutdown ladder this
+			// just blocks until that ladder finishes — which is exactly what
+			// makes the exit status below well defined. The flush above stays
+			// ahead of it, so the pane's last output still precedes its exit.
 			session.Close()
+
+			// Drop the session from the map *before* the exit event, and never
+			// the other way round. Wails does not replay events, so a shell that
+			// dies before the frontend has subscribed to pty:exit — a broken rc
+			// file, a $SHELL that exits at once — leaves a pane that is silently
+			// dead. The frontend's defence is HasSession (App.SessionExists),
+			// asked once the subscription is in place, and this ordering is what
+			// makes that question decisive: "exists" can never mean "the event
+			// is already behind you". Either the check runs after the delete and
+			// sees the session gone, so the frontend synthesizes the exit, or it
+			// sees the session present and the emit is still ahead of it —
+			// reaching a subscription that, by then, exists.
 			m.mu.Lock()
 			delete(m.sessions, session.ID)
 			m.mu.Unlock()
+
+			if m.ctx != nil {
+				code, signal := session.ExitStatus()
+				emitEvent(m.ctx, "pty:exit:"+session.ID, PtyExit{ExitCode: code, Signal: signal})
+			}
 			return
 		}
 	}
@@ -190,6 +231,17 @@ func (m *Manager) CloseSession(sessionID string) {
 	if ok {
 		session.Close()
 	}
+}
+
+// HasSession reports whether a session is still live — that is, still in the
+// map. A session leaves the map when it is closed explicitly or when its shell
+// exits, in which case readLoop removes it before emitting pty:exit; see the
+// ordering note there for why that is what makes this answer usable.
+func (m *Manager) HasSession(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.sessions[id]
+	return ok
 }
 
 // GetSessionCWD returns the current working directory of a session's shell.
@@ -252,13 +304,54 @@ func (m *Manager) GetAllSessionStatuses() map[string]SessionStatus {
 	return result
 }
 
+// RunningCommandCount reports how many sessions have something other than the
+// shell itself in the foreground.
+//
+// This is deliberately not GetAllSessionStatuses with the unused fields thrown
+// away. That one forks lsof per session for the CWD (~12 ms each) on top of the
+// ps for the command name (~2 ms), and the only thing the quit path ever reads
+// is whether the pane is busy — so a window of a dozen panes paid ~150 ms of
+// subprocesses on every Cmd-Q, before the confirmation dialog could even be
+// shown, for two numbers it discarded. Sequential is fine at the ps alone.
+func (m *Manager) RunningCommandCount() int {
+	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+
+	running := 0
+	for _, s := range sessions {
+		if s.ForegroundProcess() != "" {
+			running++
+		}
+	}
+	return running
+}
+
 // CloseAll terminates all PTY sessions and waits for readLoop goroutines to finish.
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.sessions))
 	for id, session := range m.sessions {
-		session.Close()
+		sessions = append(sessions, session)
 		delete(m.sessions, id)
 	}
 	m.mu.Unlock()
+
+	// Each Close now walks a shutdown ladder that gives the shell seconds, not
+	// microseconds, to save its history. Sequentially that is one ladder per
+	// pane — a window of 17 shells would hang the quit for half a minute — so
+	// they run together and the quit costs one ladder, not seventeen.
+	var closing sync.WaitGroup
+	for _, session := range sessions {
+		closing.Add(1)
+		go func() {
+			defer closing.Done()
+			session.Close()
+		}()
+	}
+	closing.Wait()
 	m.wg.Wait()
 }

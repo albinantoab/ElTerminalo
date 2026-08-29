@@ -81,7 +81,7 @@ export class HistoryModal {
         const sessionId = this.callbacks.getActiveSessionId();
         if (sessionId) {
           const data = e.metaKey ? entry.command + '\n' : entry.command;
-          window.go.main.App.WriteToSession(sessionId, utf8ToBase64(data));
+          window.go.main.App.WriteToSession(sessionId, utf8ToBase64(data)).catch(() => {});
         }
         this.hide();
       }
@@ -184,7 +184,7 @@ export class HistoryModal {
           if (entry) {
             const sessionId = this.callbacks.getActiveSessionId();
             if (sessionId) {
-              window.go.main.App.WriteToSession(sessionId, utf8ToBase64(entry.command));
+              window.go.main.App.WriteToSession(sessionId, utf8ToBase64(entry.command)).catch(() => {});
             }
             this.hide();
           }

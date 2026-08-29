@@ -32,7 +32,7 @@ func main() {
 
 	// Minimal menu — Edit menu is required for Cmd+C/V/X/A to reach the webview
 	appMenu := menu.NewMenu()
-	appMenu.Append(menu.AppMenu()) // keeps About, Hide, Quit
+	appMenu.Append(menu.AppMenu())  // keeps About, Hide, Quit
 	appMenu.Append(menu.EditMenu()) // enables Cut, Copy, Paste, Select All
 
 	err = wails.Run(&options.App{
@@ -53,9 +53,9 @@ func main() {
 		Mac: &mac.Options{
 			TitleBar: &mac.TitleBar{
 				TitlebarAppearsTransparent: true,
-				HideTitle:                 true,
-				HideTitleBar:              false,
-				FullSizeContent:           true,
+				HideTitle:                  true,
+				HideTitleBar:               false,
+				FullSizeContent:            true,
 			},
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,

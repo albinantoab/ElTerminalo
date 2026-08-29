@@ -195,6 +195,24 @@ export class ShellIntegration {
     }
   }
 
+  /** Forget every tracked block, keeping the OSC handler attached. Needed when
+   *  a pane resets its terminal for a fresh shell: the buffers are replaced
+   *  wholesale, so markers into the old ones would silently point at nothing.
+   *  Disposing them cascades to whatever hangs off them (smart-render badges). */
+  reset(): void {
+    const all = this.currentBlock ? [...this.blocks, this.currentBlock] : [...this.blocks];
+    for (const block of all) {
+      block.decorations.forEach(d => d.dispose());
+      block.promptMarker.dispose();
+      block.commandStartMarker?.dispose();
+      block.outputStartMarker?.dispose();
+      block.outputEndMarker?.dispose();
+    }
+    this.blocks = [];
+    this.currentBlock = null;
+    this.active = false;
+  }
+
   dispose(): void {
     if (this.oscHandler) {
       this.oscHandler.dispose();

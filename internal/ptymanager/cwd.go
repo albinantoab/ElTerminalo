@@ -13,6 +13,12 @@ import (
 // CWD returns the current working directory of the shell process.
 // On macOS it uses lsof; on Linux it reads /proc/PID/cwd.
 func (s *Session) CWD() (string, error) {
+	// Once the session has been closed its shell is reaped and the kernel may
+	// hand that pid to an unrelated process — whose cwd would then be reported
+	// as the pane's and saved into the layout.
+	if s.closed.Load() {
+		return "", fmt.Errorf("session closed")
+	}
 	if s.cmd.Process == nil {
 		return "", fmt.Errorf("process not running")
 	}

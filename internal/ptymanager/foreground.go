@@ -15,18 +15,14 @@ import (
 // ForegroundProcess returns the name of the foreground process in this PTY.
 // Returns empty string if the shell itself is in the foreground (idle).
 func (s *Session) ForegroundProcess() string {
-	if s.cmd.Process == nil {
+	// A closed session's pid is reaped and can be reused, so stop asking about
+	// it rather than reporting a stranger's command as this pane's.
+	if s.closed.Load() {
 		return ""
 	}
 
-	fd := int(s.ptmx.Fd())
-	pgid, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
-	if err != nil {
-		return ""
-	}
-
-	// If the foreground PGID matches the shell PID, the shell is idle
-	if pgid == s.cmd.Process.Pid {
+	pgid := s.foregroundPgid()
+	if pgid == 0 {
 		return ""
 	}
 
@@ -35,6 +31,33 @@ func (s *Session) ForegroundProcess() string {
 		return ""
 	}
 	return name
+}
+
+// foregroundPgid returns the process group the tty currently has in the
+// foreground, or 0 when that group is the shell itself (an idle pane), when
+// there is no shell, or when the tty cannot answer.
+//
+// This — not the shell's pgid — is the group a command the user started belongs
+// to. A login shell is interactive and has job control on, so it puts every
+// foreground job in a process group of its own; the shell's own group does not
+// contain it. Close needs that distinction to reach the job at all.
+//
+// It asks the tty, so it only works while the master is open: Close must call it
+// before closing the master, not after.
+func (s *Session) foregroundPgid() int {
+	if s.cmd.Process == nil {
+		return 0
+	}
+	pgid, err := unix.IoctlGetInt(int(s.ptmx.Fd()), unix.TIOCGPGRP)
+	if err != nil {
+		return 0
+	}
+	// 0 and 1 are never a job of ours, and signalling either group would mean
+	// "every process this user owns" or launchd. Report them as "no job".
+	if pgid <= 1 || pgid == s.cmd.Process.Pid {
+		return 0
+	}
+	return pgid
 }
 
 // processName returns the command name for a given PID.

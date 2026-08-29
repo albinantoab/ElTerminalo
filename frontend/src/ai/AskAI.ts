@@ -74,7 +74,7 @@ export class AskAI {
 
       const sessionId = this.callbacks.getActiveSessionId();
       if (sessionId && command) {
-        window.go.main.App.WriteToSession(sessionId, utf8ToBase64(command));
+        window.go.main.App.WriteToSession(sessionId, utf8ToBase64(command)).catch(() => {});
       }
 
       this.callbacks.setAILoading(false);

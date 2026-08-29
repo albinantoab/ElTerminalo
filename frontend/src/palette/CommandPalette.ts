@@ -116,9 +116,9 @@ export class CommandPalette {
           if (isMultiline) {
             // Use bracketed paste so shells treat multiline text as a single paste
             const data = '\x1b[200~' + c.command + '\x1b[201~' + (metaKey ? '' : '\n');
-            window.go.main.App.WriteToSession(sessionId, utf8ToBase64(data));
+            window.go.main.App.WriteToSession(sessionId, utf8ToBase64(data)).catch(() => {});
           } else {
-            window.go.main.App.WriteToSession(sessionId, utf8ToBase64(c.command + (metaKey ? '' : '\n')));
+            window.go.main.App.WriteToSession(sessionId, utf8ToBase64(c.command + (metaKey ? '' : '\n'))).catch(() => {});
           }
         },
       };

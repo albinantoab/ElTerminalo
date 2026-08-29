@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import '../types/wails.d.ts';
+import type { PtyExitPayload } from '../types/wails.d.ts';
 import { utf8ToBase64 } from '../utils';
 import { CMD } from '../constants';
 import { ShellIntegration } from './ShellIntegration';
@@ -73,6 +74,12 @@ function parseOsc7Path(data: string): string {
   }
 }
 
+// Backend error strings and signal names are written straight into the
+// terminal, where a stray control byte would be read as an escape sequence.
+function sanitizeForTerminal(s: string): string {
+  return s.replace(/[\x00-\x1f\x7f]/g, ' ');
+}
+
 export class TerminalPane {
   public sessionId: string = '';
   public terminal: Terminal;
@@ -93,6 +100,15 @@ export class TerminalPane {
   private lastKnownCwd: string = '';
   private cwdReportedByShell = false;
   private cwdOscHandler: IDisposable | null = null;
+  private disposed = false;
+  private connecting = false;
+  // Set while the pane has no shell and is showing a "Press Enter" hint, so a
+  // stray Enter before the first connect can't spawn a second shell.
+  private awaitingRestart = false;
+  // Called when this pane's shell exits. The host owns the decision of whether
+  // the pane survives; with no host listening the pane keeps itself and offers
+  // a restart.
+  public onExit: ((exit: PtyExitPayload) => void) | null = null;
 
   constructor(container: HTMLElement, theme: XtermTheme) {
     this.container = container;
@@ -129,25 +145,50 @@ export class TerminalPane {
     });
     this.smartRender = new SmartRenderManager(this.terminal, container, this.shellIntegration);
 
-    // Block Ctrl+L from reaching the shell — only Cmd+L should clear
     // Send CSI u sequence for Shift+Enter so apps like Claude CLI can
-    // distinguish it from plain Enter (matches iTerm / Kitty behaviour)
+    // distinguish it from plain Enter (matches iTerm / Kitty behaviour).
+    // Ctrl+L is deliberately left alone: vim, less, tmux and Claude Code all
+    // bind it, and Cmd+L is this app's own clear.
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (e.type === 'keydown' && e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'l') {
-        return false;
-      }
       if (e.type === 'keydown' && e.shiftKey && e.key === 'Enter') {
         e.preventDefault();
-        window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x1b[13;2u'));
+        this.sendInput('\x1b[13;2u');
         return false;
       }
       // CMD+Backspace: delete entire line (send Ctrl+U)
       if (e.type === 'keydown' && e.metaKey && e.key === 'Backspace') {
         e.preventDefault();
-        window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x15'));
+        this.sendInput('\x15');
         return false;
       }
       return true;
+    });
+
+    // Input plumbing is wired once, for the life of the pane: connect() runs
+    // again whenever a dead shell is restarted, and re-subscribing there would
+    // duplicate every keystroke and every resize.
+    this.terminal.onData((data: string) => {
+      if (!this.sessionId) {
+        // Dead pane: Enter revives it, everything else is dropped so keystrokes
+        // can't pile up as rejected WriteToSession promises.
+        if (this.awaitingRestart && (data === '\r' || data === '\n')) {
+          this.awaitingRestart = false;
+          // Out of the key handler first: restart() resets the terminal, which
+          // must not happen while xterm is still dispatching this data event.
+          queueMicrotask(() => { void this.restart(); });
+        }
+        return;
+      }
+      this.sendInput(data);
+    });
+
+    // Forward resize events to PTY — debounced to avoid shell prompt spam
+    this.terminal.onResize(({ cols, rows }: { cols: number; rows: number }) => {
+      if (cols !== this.lastCols || rows !== this.lastRows) {
+        this.lastCols = cols;
+        this.lastRows = rows;
+        this.debouncedPtyResize(cols, rows);
+      }
     });
 
     // Custom context menu — xterm renders on canvas so Wails'
@@ -172,45 +213,188 @@ export class TerminalPane {
   }
 
   async connect(cwd: string = ''): Promise<void> {
+    if (this.disposed) return;
     const cols = this.terminal.cols;
     const rows = this.terminal.rows;
 
     // Seed the cache with the directory this pane is being opened in, so the
-    // layout can still be saved correctly before the first prompt has rendered.
+    // layout can still be saved correctly before the first prompt has rendered
+    // — and so a pane whose shell never starts still remembers where it lived.
     if (cwd) this.lastKnownCwd = cwd;
 
     // Create PTY session via Go backend
-    this.sessionId = await window.go.main.App.CreateSession(cols, rows, cwd);
+    this.connecting = true;
+    let sid: string;
+    try {
+      sid = await window.go.main.App.CreateSession(cols, rows, cwd);
+    } finally {
+      this.connecting = false;
+    }
+
+    // The pane can be closed while CreateSession is in flight; the session it
+    // just handed us would otherwise be orphaned.
+    if (this.disposed) {
+      // A binding rejects, it doesn't throw — a synchronous catch would miss it.
+      window.go.main.App.CloseSession(sid).catch(() => { /* nothing to undo */ });
+      return;
+    }
+
+    this.sessionId = sid;
+    this.awaitingRestart = false;
 
     // Subscribe to PTY output
-    const eventName = 'pty:output:' + this.sessionId;
-    this.eventCleanup = window.runtime.EventsOn(eventName, (data: string) => {
+    this.eventCleanup = window.runtime.EventsOn('pty:output:' + sid, (data: string) => {
+      // Same guard as the exit listener, and for the same reason now that
+      // unsubscribing is deferred by a microtask: a retired session's bytes
+      // don't belong in a restarted shell's screen, and a disposed terminal
+      // would throw on the write.
+      if (this.disposed || this.sessionId !== sid) return;
       // Decode base64 and write to terminal
       const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
       this.terminal.write(bytes);
     });
 
-    // Subscribe to PTY exit
-    this.exitEventCleanup = window.runtime.EventsOn('pty:exit:' + this.sessionId, () => {
-      this.terminal.write('\r\n[Process exited]\r\n');
-    });
-
-    // Forward keyboard input to PTY
-    this.terminal.onData((data: string) => {
-      window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64(data));
-    });
-
-    // Forward resize events to PTY — debounced to avoid shell prompt spam
-    this.terminal.onResize(({ cols, rows }: { cols: number; rows: number }) => {
-      if (cols !== this.lastCols || rows !== this.lastRows) {
-        this.lastCols = cols;
-        this.lastRows = rows;
-        this.debouncedPtyResize(cols, rows);
-      }
+    // Subscribe to PTY exit. The payload separates a clean `exit` from a crash
+    // or a signal, which is what decides whether the pane is worth keeping.
+    //
+    // EventsOnce, not EventsOn: a session exits once, and Wails' dispatch loop
+    // iterates a *snapshot* of the listener list which it writes back over the
+    // live one when the loop ends — so an unsubscribe decided from inside this
+    // very callback (which is what handleSessionExit does) is silently undone,
+    // leaving the listener, its closure and this whole pane alive forever. A
+    // one-shot listener is removed by that loop itself, from the snapshot, so
+    // the removal is what gets written back.
+    this.exitEventCleanup = window.runtime.EventsOnce('pty:exit:' + sid, (payload?: PtyExitPayload) => {
+      // A session this pane has already retired — closed by the user, or
+      // replaced by a restart — must not be able to reach back in.
+      if (this.disposed || this.sessionId !== sid) return;
+      this.handleSessionExit({
+        exitCode: typeof payload?.exitCode === 'number' ? payload.exitCode : 0,
+        signal: typeof payload?.signal === 'string' ? payload.signal : '',
+      });
     });
 
     this.lastCols = this.terminal.cols;
     this.lastRows = this.terminal.rows;
+
+    // A shell that dies immediately can emit its exit before the subscription
+    // above existed, and Wails does not replay events — the pane would then sit
+    // there quietly dead, with nothing on screen and Enter doing nothing. The
+    // backend drops the session from its map *before* emitting the exit, so
+    // asking now is decisive: `true` means the event is still to come, `false`
+    // means it already fired — either already handled above, or missed.
+    let stillThere = true;
+    try {
+      stillThere = await window.go.main.App.SessionExists(sid);
+    } catch {
+      // No answer is not an answer: assume the shell is alive rather than
+      // declaring a working pane dead on a transient binding failure.
+    }
+    if (!stillThere && !this.disposed && this.sessionId === sid) {
+      // The real status went with the event that was lost, so this is the
+      // backend's "unknown" pair — not a clean exit, so the pane stays and
+      // says so. If the real event arrives after all, unsubscribeSession() has
+      // cleared sessionId by then and its `this.sessionId !== sid` guard drops it.
+      this.handleSessionExit({ exitCode: -1, signal: '' });
+    }
+  }
+
+  /** Send input to this pane's shell. A no-op without a live session, so a dead
+   *  pane can't turn every keystroke into a rejected WriteToSession promise. */
+  private sendInput(data: string): void {
+    if (!this.sessionId) return;
+    window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64(data)).catch(() => {
+      // The shell can die between the keystroke and the write; the exit handler
+      // is what tells the user, so there is nothing to report here.
+    });
+  }
+
+  /** Detach from the current session's events and forget its id — from here on
+   *  the pane is dead: getCWD() falls back to the cache, input is ignored.
+   *
+   *  Safe to call from inside an event callback: the pane is retired
+   *  synchronously, but the unsubscribe calls themselves are deferred. Wails
+   *  dispatches an event over a snapshot of that event's listener list and
+   *  writes the snapshot back afterwards, so an unsubscribe run mid-dispatch is
+   *  reverted; a microtask runs only once the whole synchronous dispatch —
+   *  write-back included — has finished. Outside a dispatch this is just one
+   *  tick later, and nothing observes the difference: `sessionId` is already
+   *  gone, so both handlers ignore anything that lands in between. */
+  private unsubscribeSession(): void {
+    const offOutput = this.eventCleanup;
+    const offExit = this.exitEventCleanup;
+    this.eventCleanup = null;
+    this.exitEventCleanup = null;
+    this.sessionId = '';
+    if (!offOutput && !offExit) return;
+    queueMicrotask(() => {
+      if (offOutput) offOutput();
+      if (offExit) offExit();
+    });
+  }
+
+  private handleSessionExit(exit: PtyExitPayload): void {
+    this.unsubscribeSession();
+    if (this.onExit) {
+      this.onExit(exit);
+    } else {
+      this.showExitNotice(exit);
+    }
+  }
+
+  /** Tell the user why the pane went quiet and arm Enter to bring it back. */
+  showExitNotice(exit: PtyExitPayload): void {
+    if (this.disposed) return;
+    const clean = exit.exitCode === 0 && exit.signal === '';
+    // -1 with no signal is the backend saying its shutdown ladder gave up on a
+    // wedged process: the session is over, but how it ended is unknowable.
+    // Reported as-is, and — not being a clean exit — the pane stays.
+    const unknown = exit.exitCode === -1 && exit.signal === '';
+    const reason = exit.signal
+      ? `[Process terminated by ${sanitizeForTerminal(exit.signal)}]`
+      : clean ? '[Process exited]'
+      : unknown ? '[Process ended; exit status unknown]'
+      : `[Process exited with code ${exit.exitCode}]`;
+    const hint = clean ? 'Press Enter to start a new shell' : 'Press Enter to restart';
+    this.terminal.write(`\r\n\x1b[${clean ? '2' : '31'}m${reason}\x1b[0m\r\n\x1b[2m${hint}\x1b[0m\r\n`);
+    this.awaitingRestart = true;
+  }
+
+  /** Write one dim line into the pane on the app's own behalf — something the
+   *  shell can't say for itself. The text may carry a backend-supplied path or
+   *  message, so it is sanitized like every other foreign string. */
+  writeNotice(text: string): void {
+    if (this.disposed) return;
+    this.terminal.write(`\r\n\x1b[2m${sanitizeForTerminal(text)}\x1b[0m\r\n`);
+  }
+
+  /** A shell that never started at all — same dead pane, different message. */
+  showStartFailure(err: unknown): void {
+    if (this.disposed) return;
+    const msg = sanitizeForTerminal(err instanceof Error ? err.message : String(err));
+    this.terminal.write(`\r\n\x1b[31m[Failed to start shell: ${msg}]\x1b[0m\r\n\x1b[2mPress Enter to retry\x1b[0m\r\n`);
+    this.awaitingRestart = true;
+  }
+
+  /** Start a fresh shell in this pane, in its last-known directory. Reached
+   *  from Enter on a dead pane, so it never rejects — a failure just re-arms
+   *  the retry hint. */
+  async restart(): Promise<void> {
+    if (this.disposed || this.connecting || this.sessionId) return;
+    this.awaitingRestart = false;
+    this.unsubscribeSession();
+    // The dead shell may have left the alternate buffer, mouse tracking or
+    // bracketed paste switched on; only a full reset guarantees a usable slate.
+    // Drop the tracked command blocks first so their markers — and the badges
+    // hanging off them — go with the buffer they point into.
+    this.shellIntegration.reset();
+    this.terminal.reset();
+    try {
+      await this.connect(this.lastKnownCwd);
+    } catch (e) {
+      console.error('Failed to restart shell:', e);
+      this.showStartFailure(e);
+    }
   }
 
   fit(): void {
@@ -226,7 +410,12 @@ export class TerminalPane {
       clearTimeout(this.resizeTimer);
     }
     this.resizeTimer = setTimeout(async () => {
-      window.go.main.App.ResizeSession(this.sessionId, cols, rows);
+      this.resizeTimer = null;
+      // A pane whose shell has exited has nothing left to resize.
+      if (!this.sessionId) return;
+      // Fire-and-forget: the binding returns a promise, so a shell that died
+      // between the check above and here must be caught, not thrown.
+      window.go.main.App.ResizeSession(this.sessionId, cols, rows).catch(() => {});
       // Clear stale prompt artifacts after resize — only when the shell is idle.
       // If a process is running (yarn dev, etc.), SIGWINCH from the PTY resize
       // is enough. Sending \x0c to a running process prints ^L.
@@ -235,11 +424,10 @@ export class TerminalPane {
           const statuses = await window.go.main.App.GetAllSessionStatuses();
           const status = statuses[this.sessionId];
           if (status?.isIdle) {
-            window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x0c'));
+            window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x0c')).catch(() => {});
           }
         } catch { /* skip clear on error */ }
       }
-      this.resizeTimer = null;
     }, 150);
   }
 
@@ -299,7 +487,10 @@ export class TerminalPane {
           enabled: true,
           action: async () => {
             const text = await navigator.clipboard.readText();
-            window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64(text));
+            // Go through xterm's paste path, exactly like Cmd+V: writing the
+            // raw text to the PTY skips bracketed paste, so a multi-line
+            // clipboard would execute every line the moment it arrives.
+            this.terminal.paste(text);
           },
         },
         { type: 'separator' },
@@ -474,21 +665,28 @@ export class TerminalPane {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.awaitingRestart = false;
+    // Unsubscribe before closing, so the exit event this close provokes can no
+    // longer reach a pane that is already on its way out.
+    const sid = this.sessionId;
+    this.unsubscribeSession();
     this.smartRender.dispose();
     this.shellIntegration.dispose();
     if (this.cwdOscHandler) {
       this.cwdOscHandler.dispose();
       this.cwdOscHandler = null;
     }
-    if (this.sessionId) {
-      window.go.main.App.CloseSession(this.sessionId);
+    if (this.resizeTimer) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = null;
     }
     if (this.resizeObserver) this.resizeObserver.disconnect();
-    if (this.eventCleanup) {
-      this.eventCleanup();
-    }
-    if (this.exitEventCleanup) {
-      this.exitEventCleanup();
+    // A pane whose shell already exited has no session left to close, and the
+    // backend ignores ids it doesn't know — either way this must not throw.
+    if (sid) {
+      window.go.main.App.CloseSession(sid).catch(() => { /* already gone */ });
     }
     this.terminal.dispose();
   }
