@@ -54,6 +54,36 @@
   border: 1px solid transparent;
 }
 
+/* Reordering. WebKit needs the explicit opt-in: body sets user-select: none,
+   and without -webkit-user-drag a div with draggable="true" never starts a
+   drag at all. */
+.tab-item[draggable='true'] {
+  -webkit-user-drag: element;
+}
+
+.tab-item.tab-dragging {
+  opacity: 0.4;
+}
+
+/* Where the dragged tab would land. */
+.tab-item.tab-drop-before {
+  box-shadow: inset 2px 0 0 0 var(--border-active);
+}
+
+.tab-item.tab-drop-after {
+  box-shadow: inset -2px 0 0 0 var(--border-active);
+}
+
+/* A background tab whose shell rang the bell, until it is next activated. */
+.tab-attention {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
 .tab-item:hover {
   background: var(--border);
   color: var(--fg);

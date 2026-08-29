@@ -3,9 +3,12 @@ package theme
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/albinanto/elterminalo/internal/config"
 )
 
 // Theme represents a terminal color theme sent to the frontend.
@@ -89,9 +92,26 @@ func All() []Theme {
 	}
 }
 
-// LoadUserThemes reads custom themes from the config directory.
+// FileName is the user themes file's name inside the config directory.
+const FileName = "themes.json"
+
+// filePerm keeps themes.json owner-only, matching every other file this app
+// publishes into the config directory. It is not secret, but there is no reason
+// for it to be world-readable either, and the mode is applied literally by
+// config.WriteFileDurable rather than filtered by the umask.
+const filePerm = 0o600
+
+// Path returns the location of the user themes file inside configDir.
+func Path(configDir string) string {
+	return filepath.Join(configDir, FileName)
+}
+
+// LoadUserThemes reads custom themes from the config directory. A missing file
+// is the ordinary case and is not an error; anything else — unreadable, or
+// present and unparseable — is, and the error names the file so a caller that
+// surfaces it says which one to fix.
 func LoadUserThemes(configDir string) ([]Theme, error) {
-	path := filepath.Join(configDir, "themes.json")
+	path := Path(configDir)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -103,33 +123,73 @@ func LoadUserThemes(configDir string) ([]Theme, error) {
 		Themes []Theme `json:"themes"`
 	}
 	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("invalid themes.json: %w", err)
+		return nil, fmt.Errorf("%s does not parse: %w", path, err)
 	}
 	return file.Themes, nil
 }
 
 // SaveUserThemes writes custom themes to the config directory.
+//
+// Durable, owner-only, and through config.WriteFileDurable rather than a
+// hand-rolled write: the previous version wrote a fixed <path>.tmp at 0644 with
+// no fsync, which meant two concurrent saves shared one scratch inode and
+// published a splice of both, a power loss could commit the rename over
+// unwritten data, and the scratch file was invisible to the config directory's
+// temp sweep because it did not carry the name that sweep globs for.
 func SaveUserThemes(configDir string, themes []Theme) error {
-	path := filepath.Join(configDir, "themes.json")
 	data, err := json.MarshalIndent(struct {
 		Themes []Theme `json:"themes"`
 	}{Themes: themes}, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	// Trailing newline: this is a file people edit by hand.
+	data = append(data, '\n')
+	return config.WriteFileDurable(Path(configDir), data, filePerm)
+}
+
+// Upsert saves t into the user's themes.json, replacing any theme of the same
+// name and appending it otherwise. Names are compared case-insensitively,
+// because Merged resolves a user theme against a built-in the same way: two
+// entries that differ only in case would shadow each other unpredictably.
+//
+// A themes.json that exists but cannot be read or parsed is a hard error, and
+// nothing is written. This used to be treated as "there are no themes", which
+// meant one stray comma cost the user every custom theme they had the next time
+// anything saved one — the file was silently replaced by a document containing
+// only the new theme. Failing here instead is the same policy the settings
+// package follows: whatever is on disk is the user's text, an import that
+// cannot be completed says so, and the file is still there to repair.
+func Upsert(configDir string, t Theme) error {
+	existing, err := LoadUserThemes(configDir)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+
+	for i, e := range existing {
+		if strings.EqualFold(e.Name, t.Name) {
+			existing[i] = t
+			return SaveUserThemes(configDir, existing)
+		}
+	}
+	return SaveUserThemes(configDir, append(existing, t))
 }
 
 // Merged returns built-in themes with user themes appended.
 // If a user theme has the same name as a built-in, the user theme replaces it.
+//
+// A themes.json that cannot be read costs the user every custom theme in the
+// picker, which looks exactly like the app having forgotten them, so it is
+// logged. Read-only either way: nothing here writes, and Upsert refuses to
+// write over a file in that state.
 func Merged(configDir string) []Theme {
 	builtIns := All()
 	userThemes, err := LoadUserThemes(configDir)
-	if err != nil || len(userThemes) == 0 {
+	if err != nil {
+		log.Printf("theme: %v; only the built-in themes are available until it is fixed", err)
+		return builtIns
+	}
+	if len(userThemes) == 0 {
 		return builtIns
 	}
 

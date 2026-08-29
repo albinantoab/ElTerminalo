@@ -1,0 +1,87 @@
+/* Find in scrollback — one bar, in the top-right corner of the active pane */
+.find-bar {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  /* Above the pane's corner brackets (z-index 2) and the split dividers (10),
+     which are the only things it can overlap inside a pane. */
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 5px;
+  background: var(--status-bg);
+  border: 1px solid #3a3a4e;
+  border-radius: 0;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  max-width: calc(100% - 12px);
+}
+
+.find-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 6px;
+  outline: none;
+  width: 150px;
+  min-width: 60px;
+}
+
+.find-input:focus {
+  border-color: var(--border-active);
+}
+
+.find-bar.is-invalid .find-input {
+  border-color: #f85149;
+}
+
+.find-count {
+  color: #6b7280;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 42px;
+  text-align: right;
+  /* Usually a count, occasionally a sentence ("Highlighting paused…"). In a
+     narrow pane the sentence is trimmed rather than allowed to push the bar
+     past the pane's edge; the element's title carries the whole of it. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.find-bar.is-invalid .find-count {
+  color: #f85149;
+}
+
+.find-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0;
+  color: #6b7280;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 5px;
+  cursor: pointer;
+  min-width: 20px;
+}
+
+.find-btn:hover {
+  color: var(--fg);
+  background: var(--border);
+}
+
+.find-toggle.is-on {
+  color: var(--fg);
+  border-color: var(--border-active);
+  background: color-mix(in srgb, var(--border-active) 22%, transparent);
+}
+
+.find-close:hover {
+  color: #f85149;
+  background: rgba(248, 81, 73, 0.1);
+}

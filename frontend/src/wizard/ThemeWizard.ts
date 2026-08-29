@@ -117,6 +117,7 @@ export class ThemeWizard {
         </div>
       </div>
       <div class="theme-wizard-footer">
+        <div class="theme-wizard-error" hidden></div>
         <button class="theme-btn theme-btn-cancel">Cancel</button>
         <button class="theme-btn theme-btn-save">Save Theme</button>
       </div>
@@ -151,11 +152,27 @@ export class ThemeWizard {
     }
   }
 
+  /** Say why the theme was not saved, in the wizard the user is looking at.
+   *
+   *  The backend refuses to write a themes.json it could not parse — rather than
+   *  overwrite whatever is in there — and its error names the file. That is
+   *  something the user can act on, and it used to go only to the log: the
+   *  wizard simply sat there, looking as though the Save button did nothing. */
+  private showError(message: string): void {
+    const el = this.overlay.querySelector('.theme-wizard-error') as HTMLElement | null;
+    if (!el) return;
+    el.textContent = message;
+    el.hidden = message === '';
+  }
+
   private async save(): Promise<void> {
     const getVal = (field: string): string => {
       const input = this.overlay.querySelector(`[data-field="${field}"]`) as HTMLInputElement;
       return input?.value.trim() || '';
     };
+
+    // Whatever went wrong last time is about to be answered, one way or another.
+    this.showError('');
 
     const name = getVal('name');
     if (!name) {
@@ -185,6 +202,10 @@ export class ThemeWizard {
       await this.callbacks.onSave();
     } catch (e) {
       logError(`Failed to save theme "${name}"`, e);
+      // Still open, still holding everything that was typed: the failure is
+      // about the file on disk, not about the colours, and the fix is usually
+      // one the user can make before pressing Save again.
+      this.showError(`Could not save "${name}": ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 }

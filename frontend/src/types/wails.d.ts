@@ -61,6 +61,58 @@ export interface WailsApp {
   CheckModelUpdate(): Promise<boolean>;
   InitLLM(): Promise<void>;
   GetSystemStats(): Promise<SystemStats>;
+  /** The user's settings, already validated and defaulted on the Go side.
+   *  The frontend normalizes the result anyway — see `normalizeSettings` in
+   *  main.ts: a hand-edited config.json reaches xterm through this call, and
+   *  xterm *throws* on an out-of-range `lineHeight` or an unknown
+   *  `cursorStyle`, which would take the whole window down. */
+  GetSettings(): Promise<Settings>;
+  /** Open config.json in the user's editor. */
+  OpenSettingsFile(): Promise<void>;
+  /** Set the native window title. It is hidden behind the custom titlebar, but
+   *  it is what the Window menu and the app switcher read. */
+  SetWindowTitle(title: string): Promise<void>;
+  /** Play the system alert sound, for a terminal bell the user asked to hear. */
+  Bell(): Promise<void>;
+  /** Ask the user for a color scheme file and import it. Resolves with the
+   *  imported theme's name, or "" when the user cancelled; rejects when the
+   *  file could not be parsed. */
+  ImportColorScheme(): Promise<string>;
+}
+
+/** The subset of config.json this app reads. The Go side owns the file, its
+ *  validation and its defaults; these are the same defaults, kept here so the
+ *  frontend can still start with something sane if the call fails or returns a
+ *  value neither side expected. See DEFAULT_SETTINGS in constants.ts. */
+export interface Settings {
+  fontFamily: string;
+  /** Points. 6-72 on disk; the session's zoom is applied on top of it. */
+  fontSize: number;
+  lineHeight: number;
+  cursorStyle: 'block' | 'underline' | 'bar';
+  cursorBlink: boolean;
+  scrollback: number;
+  /** Informational here — the backend is what spawns the shell. */
+  shell: string;
+  /** Whether Option sends Meta rather than composing a character. */
+  optionIsMeta: boolean;
+  bell: 'none' | 'sound' | 'visual' | 'both';
+  copyOnSelect: boolean;
+  /** Go-side only: the frontend never asks this question itself. */
+  confirmQuit: 'running' | 'always' | 'never';
+}
+
+/** Payload of the `menu:action` event — one of the action names the native
+ *  menu bar can send. Routed to the same functions the keyboard uses; see
+ *  `dispatchAction`. */
+export interface MenuActionPayload {
+  action: string;
+}
+
+/** Payload of the `themes:changed` event: the theme list on disk changed and
+ *  `name` is the one to switch to. */
+export interface ThemesChangedPayload {
+  name: string;
 }
 
 /** Payload of the `pty:exit:<sessionId>` event. `exitCode` is 0–255 for a
@@ -172,6 +224,10 @@ export interface WailsRuntime {
    *  the event never arrives. */
   EventsOnce(eventName: string, callback: (...args: any[]) => void): () => void;
   EventsOff(eventName: string): void;
+  /** Hand a URL to the OS, which opens it in the user's browser. The only way
+   *  out of the webview: `window.open` inside a WKWebView with no UI delegate
+   *  goes nowhere, and navigating the frame would replace the app. */
+  BrowserOpenURL(url: string): void;
 }
 
 declare global {

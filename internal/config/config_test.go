@@ -532,7 +532,7 @@ func seedFile(t *testing.T, dir, name string, age time.Duration) string {
 	return path
 }
 
-// A crash between writeFileDurable's CreateTemp and its rename leaves a scratch
+// A crash between WriteFileDurable's CreateTemp and its rename leaves a scratch
 // file that nothing ever comes back for, so without a sweep they accumulate for
 // the life of the install. New() calls this against the real config directory;
 // the sweep is a function of its own precisely so it can be tested against one
@@ -584,7 +584,7 @@ func TestSweepTempFilesRemovesCrashDebris(t *testing.T) {
 func TestSweepTempFilesSparesAnInFlightWrite(t *testing.T) {
 	dir := t.TempDir()
 
-	// What another instance's writeFileDurable has open right now.
+	// What another instance's WriteFileDurable has open right now.
 	inFlight := seedFile(t, dir, stateFileName+".tmp-inflight", 0)
 	// Just inside the cutoff: a write that has been going for nine minutes is
 	// implausible, but it is not this sweep's business to decide it is dead.

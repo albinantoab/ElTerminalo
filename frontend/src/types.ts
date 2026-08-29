@@ -16,7 +16,15 @@ export interface SplitNode {
 
 export interface Tab {
   id: string;
+  /** The tab's own name. Only what the *user* typed is authoritative — see
+   *  `renamed`; otherwise this is the "Terminalo N" placeholder the tab was
+   *  born with, and the last fallback behind the shell's title and its cwd. */
   name: string;
+  /** True once the user has renamed this tab by hand. From then on the name
+   *  they chose wins over anything the shell reports about itself. */
+  renamed: boolean;
+  /** A background tab whose bell rang. Cleared the next time it is activated. */
+  attention: boolean;
   panes: PaneInfo[];
   activeIndex: number;
   layoutRoot: SplitNode | null;
@@ -32,6 +40,9 @@ export interface SavedSplitNode {
 
 export interface SavedTab {
   name: string;
+  /** Absent in state written before this existed, which is exactly right:
+   *  those tabs were never renamed by hand. */
+  renamed?: boolean;
   layout: SavedSplitNode;
 }
 

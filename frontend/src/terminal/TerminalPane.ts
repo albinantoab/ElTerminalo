@@ -1,11 +1,14 @@
 import { Terminal, IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
+import { SearchAddon } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
 import '../types/wails.d.ts';
 import type { PtyExitPayload } from '../types/wails.d.ts';
 import { utf8ToBase64, base64ToBytes } from '../utils';
-import { CMD, ACK_FLUSH_BYTES, ACK_FLUSH_MS } from '../constants';
+import { CMD, ACK_FLUSH_BYTES, ACK_FLUSH_MS, SELECTION_COPY_DEBOUNCE_MS, TITLE_MAX_LENGTH } from '../constants';
 import { logError, logWarn } from '../log';
 import { ShellIntegration } from './ShellIntegration';
 import { SmartRenderManager } from './smartrender/SmartRenderManager';
@@ -31,6 +34,21 @@ export interface XtermTheme {
   brightMagenta: string;
   brightCyan: string;
   brightWhite: string;
+}
+
+/** The slice of the user's settings a pane actually runs on. The host builds
+ *  it — the session's font zoom is folded into `fontSize` there, and
+ *  `cursorBlink` is already ANDed with "is this the focused pane". */
+export interface PaneOptions {
+  fontFamily: string;
+  fontSize: number;
+  lineHeight: number;
+  cursorStyle: 'block' | 'underline' | 'bar';
+  cursorBlink: boolean;
+  scrollback: number;
+  /** xterm's `macOptionIsMeta`, from the `optionIsMeta` setting. */
+  macOptionIsMeta: boolean;
+  copyOnSelect: boolean;
 }
 
 export interface TerminalContextActions {
@@ -84,7 +102,12 @@ function sanitizeForTerminal(s: string): string {
 export class TerminalPane {
   public sessionId: string = '';
   public terminal: Terminal;
+  /** Scrollback search, driven by the find bar. Public because the bar is the
+   *  host's — one bar at a time, for whichever pane is active. */
+  public readonly search: SearchAddon;
   private fitAddon: FitAddon;
+  private webLinksAddon: WebLinksAddon;
+  private unicodeAddon: Unicode11Addon;
   private container: HTMLElement;
   private resizeObserver: ResizeObserver;
   private eventCleanup: (() => void) | null = null;
@@ -105,6 +128,17 @@ export class TerminalPane {
   private pendingAckBytes = 0;
   private ackTimer: ReturnType<typeof setTimeout> | null = null;
   private ctxActions: TerminalContextActions | null = null;
+  // What this pane is meant to be running with. Kept so the font options can be
+  // re-applied on the way back on screen — see applyOptions().
+  private options: PaneOptions;
+  private fontOptionsPending = false;
+  private selectionCopyTimer: ReturnType<typeof setTimeout> | null = null;
+  // The button of the last mousedown on this pane, with a macOS Ctrl+click
+  // counted as the right one, and when that right-click was. Together they are
+  // what keeps copy-on-select out of a context-menu gesture — see
+  // inRightClickGesture().
+  private lastMouseButton = 0;
+  private lastRightClickAt = 0;
   public shellIntegration: ShellIntegration;
   public smartRender: SmartRenderManager;
   // Last directory the shell reported (OSC 7), or the one this pane was opened
@@ -112,6 +146,9 @@ export class TerminalPane {
   // be allowed to erase the pane's folder from the saved layout.
   private lastKnownCwd: string = '';
   private cwdReportedByShell = false;
+  // The last title the shell set with OSC 0/2, or '' if it never has. Second in
+  // line behind a hand-renamed tab when the tab bar picks a name.
+  private oscTitle = '';
   private cwdOscHandler: IDisposable | null = null;
   private disposed = false;
   private connecting = false;
@@ -122,16 +159,27 @@ export class TerminalPane {
   // the pane survives; with no host listening the pane keeps itself and offers
   // a restart.
   public onExit: ((exit: PtyExitPayload) => void) | null = null;
+  /** Called when the shell rang the bell (BEL, or OSC 777). The host owns what
+   *  a bell *means* — the sound, the flash, the tab marker — because only it
+   *  knows whether this pane is the one being looked at. */
+  public onBell: (() => void) | null = null;
+  /** Called when anything that feeds this pane's displayed name changes: the
+   *  OSC 0/2 title, or the OSC 7 working directory. Fired on every report, so
+   *  the host debounces rather than the pane guessing what it is for. */
+  public onTitleChange: (() => void) | null = null;
 
-  constructor(container: HTMLElement, theme: XtermTheme) {
+  constructor(container: HTMLElement, theme: XtermTheme, options: PaneOptions) {
     this.container = container;
+    this.options = options;
 
     this.terminal = new Terminal({
-      cursorBlink: true,
-      cursorStyle: 'block',
-      fontFamily: "'MonaspiceNe NFM', 'SF Mono', 'Menlo', monospace",
-      fontSize: 12,
-      lineHeight: 1.2,
+      cursorBlink: options.cursorBlink,
+      cursorStyle: options.cursorStyle,
+      fontFamily: options.fontFamily,
+      fontSize: options.fontSize,
+      lineHeight: options.lineHeight,
+      scrollback: options.scrollback,
+      macOptionIsMeta: options.macOptionIsMeta,
       theme: theme,
       allowProposedApi: true,
       rightClickSelectsWord: true,
@@ -140,7 +188,90 @@ export class TerminalPane {
     this.fitAddon = new FitAddon();
     this.terminal.loadAddon(this.fitAddon);
 
+    // Unicode 11 widths, before anything is written: the addon only *registers*
+    // the provider (its activate() does nothing else), so the version has to be
+    // selected here. Without it xterm measures emoji and CJK with the Unicode 6
+    // table and every line containing one drifts a column out of step with what
+    // the shell thinks it drew.
+    this.unicodeAddon = new Unicode11Addon();
+    this.terminal.loadAddon(this.unicodeAddon);
+    this.terminal.unicode.activeVersion = '11';
+
+    // URLs become clickable, but only with Cmd held. A terminal's mouse belongs
+    // to the program running in it — selecting text, vim, tmux, `less` — so a
+    // plain click must never navigate anywhere; the addon's default handler
+    // does exactly that, which is why it is replaced rather than configured.
+    this.webLinksAddon = new WebLinksAddon((event: MouseEvent, uri: string) => {
+      if (!event.metaKey) return;
+      // The only way out of the webview: window.open() inside WKWebView with no
+      // UI delegate goes nowhere, and navigating this frame would replace the app.
+      try {
+        window.runtime.BrowserOpenURL(uri);
+      } catch (e) {
+        logWarn(`Failed to open ${uri} in the browser`, e);
+      }
+    });
+    this.terminal.loadAddon(this.webLinksAddon);
+
+    this.search = new SearchAddon();
+    this.terminal.loadAddon(this.search);
+
     this.terminal.open(container);
+
+    // OSC 0 / OSC 2: the window title the shell (or the program it is running)
+    // wants. Second in line for the tab's name, behind a manual rename.
+    this.terminal.onTitleChange((title: string) => {
+      // Whatever is on the far end of the pty chose this string — a remote
+      // shell as readily as a local one — and it ends up in a DOM attribute
+      // and in the native window title. Control bytes go, and it is cut to a
+      // length a tab bar and a Window menu can actually hold.
+      const next = sanitizeForTerminal(title).trim().slice(0, TITLE_MAX_LENGTH);
+      if (next === this.oscTitle) return;
+      this.oscTitle = next;
+      this.onTitleChange?.();
+    });
+
+    this.terminal.onBell(() => this.onBell?.());
+
+    // Which pointer gesture is in progress, watched from the pane's own element
+    // so it is known before xterm has decided what the click means. Capture
+    // phase for the same reason: this must see the press whatever the layers
+    // below do with it.
+    container.addEventListener('mousedown', (e: MouseEvent) => {
+      // macOS turns Ctrl+left-click into a context-menu click, and everything
+      // below treats it as the right button — the webview, xterm's right-click
+      // word select, and this pane's own menu.
+      const contextClick = e.button === 2 || (e.button === 0 && e.ctrlKey);
+      this.lastMouseButton = contextClick ? 2 : e.button;
+      if (contextClick) this.lastRightClickAt = performance.now();
+    }, true);
+
+    // Copy-on-select. The event fires on every mouse move that extends a drag,
+    // so only the trailing edge is worth a clipboard write; an empty selection
+    // is the *clearing* of one and must not wipe what was copied before it.
+    //
+    // And only a left-button drag counts. `rightClickSelectsWord` means a
+    // right-click *makes* a selection — the word under the pointer — and fires
+    // this event with it, so without the gesture test the click that opens the
+    // context menu would silently overwrite the clipboard, and the menu's own
+    // Paste would then paste that word back into the shell.
+    this.terminal.onSelectionChange(() => {
+      if (!this.options.copyOnSelect) return;
+      if (this.inRightClickGesture()) return;
+      if (this.selectionCopyTimer) clearTimeout(this.selectionCopyTimer);
+      this.selectionCopyTimer = setTimeout(() => {
+        this.selectionCopyTimer = null;
+        if (this.disposed || !this.options.copyOnSelect) return;
+        // Re-checked: a right-click landing inside the debounce window is the
+        // user reaching for the menu, whatever the selection was before it.
+        if (this.inRightClickGesture()) return;
+        const text = this.terminal.getSelection();
+        if (!text) return;
+        navigator.clipboard.writeText(text).catch(() => {
+          // Denied or unfocused — the explicit Cmd+C path still works.
+        });
+      }, SELECTION_COPY_DEBOUNCE_MS);
+    });
 
     // Register OSC 133 handler for shell integration (command blocks)
     this.shellIntegration = new ShellIntegration(this.terminal);
@@ -151,8 +282,12 @@ export class TerminalPane {
     this.cwdOscHandler = this.terminal.parser.registerOscHandler(7, (data: string) => {
       const cwd = parseOsc7Path(data);
       if (cwd) {
+        const changed = cwd !== this.lastKnownCwd;
         this.lastKnownCwd = cwd;
         this.cwdReportedByShell = true;
+        // Last in line behind the OSC title, but it is what most shells give
+        // us, so a `cd` renames the tab.
+        if (changed) this.onTitleChange?.();
       }
       return true;
     });
@@ -319,6 +454,16 @@ export class TerminalPane {
     }
   }
 
+  /** True while the pointer gesture on this pane is a context-menu one: the last
+   *  button pressed was the right one (or a macOS Ctrl+click), or one was
+   *  pressed within the copy debounce window. A selection made by such a click
+   *  is xterm selecting the word under the pointer for the menu, not the user
+   *  choosing something to copy. */
+  private inRightClickGesture(): boolean {
+    if (this.lastMouseButton !== 0) return true;
+    return performance.now() - this.lastRightClickAt < SELECTION_COPY_DEBOUNCE_MS;
+  }
+
   /** Send input to this pane's shell. A no-op without a live session, so a dead
    *  pane can't turn every keystroke into a rejected WriteToSession promise. */
   private sendInput(data: string): void {
@@ -472,6 +617,13 @@ export class TerminalPane {
     // Drop the tracked command blocks first so their markers — and the badges
     // hanging off them — go with the buffer they point into.
     this.shellIntegration.reset();
+    // Same reason as the command blocks: the search addon's highlights are
+    // decorations hung off markers in the buffer that is about to go. The
+    // addon itself survives reset() — reset() rebuilds the buffer and the
+    // input handler, and touches neither the addon manager nor the link
+    // providers nor the registered Unicode versions — but its cached term
+    // would go on describing a screen that no longer exists.
+    this.search.clearDecorations();
     this.terminal.reset();
     try {
       await this.connect(this.lastKnownCwd);
@@ -737,6 +889,62 @@ export class TerminalPane {
     this.terminal.focus();
   }
 
+  /** The title the shell last set with OSC 0/2, or '' if it never has. */
+  get title(): string {
+    return this.oscTitle;
+  }
+
+  /** The last directory this pane is known to have been in — the shell's own
+   *  OSC 7 report where there is one, otherwise the directory it was opened
+   *  with. Never '' once anything has been established. */
+  get cwd(): string {
+    return this.lastKnownCwd;
+  }
+
+  /** Apply a new set of options to a live pane: a settings reload, or a font
+   *  zoom.
+   *
+   *  Everything except the font is set straight away. The font is held back
+   *  while the pane is off screen — not because xterm 5.5 needs it to be, but
+   *  because the one case where it would matter cannot be told apart from here.
+   *  The default cell measurement is TextMetricsMeasureStrategy: an
+   *  OffscreenCanvas `measureText`, which depends on no layout at all and is
+   *  perfectly correct in a detached container. Only the DomMeasureStrategy
+   *  fallback — a hidden span the browser has to lay out — reads zero there, and
+   *  a zero measurement is *discarded*, leaving the previous cell size in place
+   *  with nothing to re-measure on the way back; the next fit() would then size
+   *  the pty from the old font's metrics. So the font waits for flushOptions(),
+   *  which the host calls once the pane is back in the document. On the common
+   *  path that costs one deferred assignment and changes nothing. */
+  applyOptions(options: PaneOptions): void {
+    if (this.disposed) return;
+    this.options = options;
+    this.terminal.options.cursorStyle = options.cursorStyle;
+    this.terminal.options.cursorBlink = options.cursorBlink;
+    this.terminal.options.scrollback = options.scrollback;
+    this.terminal.options.macOptionIsMeta = options.macOptionIsMeta;
+    if (this.container.isConnected) {
+      this.applyFontOptions();
+    } else {
+      this.fontOptionsPending = true;
+    }
+  }
+
+  /** Push font options that were set while this pane was off screen. Cheap and
+   *  idempotent: xterm fires nothing when an option is assigned its current
+   *  value, so calling this on every tab switch costs a few comparisons. */
+  flushOptions(): void {
+    if (this.disposed || !this.fontOptionsPending || !this.container.isConnected) return;
+    this.applyFontOptions();
+  }
+
+  private applyFontOptions(): void {
+    this.fontOptionsPending = false;
+    this.terminal.options.fontFamily = this.options.fontFamily;
+    this.terminal.options.fontSize = this.options.fontSize;
+    this.terminal.options.lineHeight = this.options.lineHeight;
+  }
+
   setTheme(theme: XtermTheme): void {
     // Renderer-agnostic: xterm pushes the new colours into whichever renderer
     // is attached, so this works the same with or without WebGL.
@@ -811,10 +1019,22 @@ export class TerminalPane {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
     }
+    if (this.selectionCopyTimer) {
+      clearTimeout(this.selectionCopyTimer);
+      this.selectionCopyTimer = null;
+    }
     if (this.resizeObserver) this.resizeObserver.disconnect();
     // Before terminal.dispose(): the addon's teardown reaches back into the
     // terminal's render service to reinstate the canvas renderer.
     this.disableWebgl();
+    // The addon manager would dispose these itself, but it does it after
+    // terminal.dispose() has already torn down what they hold — the search
+    // addon's decorations, the link provider's registration. Disposing here is
+    // safe either way: every one of them is idempotent, and xterm wraps a
+    // loaded addon's dispose() so the manager's later pass is a no-op.
+    this.search.dispose();
+    this.webLinksAddon.dispose();
+    this.unicodeAddon.dispose();
     // A pane whose shell already exited has no session left to close, and the
     // backend ignores ids it doesn't know — either way this must not throw.
     if (sid) {

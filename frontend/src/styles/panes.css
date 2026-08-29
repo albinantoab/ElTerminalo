@@ -54,6 +54,15 @@
   box-shadow: none;
 }
 
+/* Visual bell — the whole border lights up for a moment. Held rather than
+   animated: a second bell inside the window would restart an animation from
+   nothing, which reads as a flicker rather than as a second bell. */
+.pane-leaf.bell-flash {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+              0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
 /* AI generating — pulsing glow at the bottom of active pane */
 .pane-leaf.active.ai-loading::after {
   content: '';

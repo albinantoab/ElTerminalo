@@ -74,7 +74,7 @@ export class StateManager {
         const layout = tab.layoutRoot
           ? await this.serializeLayout(tab.layoutRoot)
           : { type: 'leaf' as const };
-        savedTabs.push({ name: tab.name, layout });
+        savedTabs.push({ name: tab.name, renamed: tab.renamed, layout });
       }
       const state: SavedState = {
         version: STATE_VERSION,
@@ -98,6 +98,36 @@ export class StateManager {
       logError('Failed to load the saved window layout', e);
       return null;
     }
+  }
+
+  /** The same tree, built without asking anyone anything.
+   *
+   *  Every leaf's directory comes from the pane's own cache — the shell's last
+   *  OSC 7 report, or the directory the pane was opened in — so there is no
+   *  binding call and nothing to await. That is the whole point: the closed-tab
+   *  stack is filled in the same breath as the panes are disposed, and a
+   *  snapshot that resolved a tick later would be built from panes that no
+   *  longer exist, or land after the Cmd+Shift+T that wanted it. The autosave
+   *  keeps using serializeLayout(), which can afford to probe a shell without
+   *  integration for the answer. */
+  serializeLayoutSync(node: SplitNode): SavedSplitNode {
+    if (node.type === 'leaf' && node.paneInfo) {
+      const cwd = node.paneInfo.pane.cwd;
+      // Same rule as the async pass: no key beats an empty one.
+      return cwd ? { type: 'leaf', cwd } : { type: 'leaf' };
+    }
+    if (node.type === 'split' && node.children) {
+      return {
+        type: 'split',
+        direction: node.direction,
+        ratio: node.ratio,
+        children: [
+          this.serializeLayoutSync(node.children[0]),
+          this.serializeLayoutSync(node.children[1]),
+        ],
+      };
+    }
+    return { type: 'leaf' };
   }
 
   async serializeLayout(node: SplitNode): Promise<SavedSplitNode> {

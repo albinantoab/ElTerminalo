@@ -203,6 +203,22 @@
   flex-shrink: 0;
 }
 
+/* Why a save didn't happen, beside the button that tried it — the backend
+   refuses to overwrite a themes.json it cannot parse, and names the file.
+   `margin-right: auto` keeps it on the left without taking the buttons out of
+   their row, and the width cap keeps a long path from crowding them out. */
+.theme-wizard-error {
+  margin-right: auto;
+  align-self: center;
+  max-width: 60%;
+  padding-left: 8px;
+  border-left: 2px solid #f85149;
+  color: #f85149;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+}
+
 .theme-group-label {
   font-size: 9px;
   font-weight: 700;

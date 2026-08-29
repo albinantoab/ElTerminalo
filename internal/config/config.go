@@ -29,13 +29,13 @@ const (
 	// statePerm is the mode every file this package publishes is written with.
 	// These hold tab names and the working directory of each pane — the user's
 	// project paths — so they are owner-only. The mode is named explicitly at
-	// each call site because writeFileDurable applies it with Chmod, which the
+	// each call site because WriteFileDurable applies it with Chmod, which the
 	// umask does not filter: a 0644 there really is world-readable, rather than
 	// whatever the umask would have made of it. Files left at 0644 by an older
 	// version are tightened by the next save, which renames a fresh inode over
 	// them.
 	statePerm = 0o600
-	// tempSuffix is the scratch-name suffix writeFileDurable hands to
+	// tempSuffix is the scratch-name suffix WriteFileDurable hands to
 	// os.CreateTemp, where "*" is the random part it substitutes. It doubles as
 	// the tail of sweepTempFiles' glob, where the same "*" matches that random
 	// part — one constant so renaming the scratch files cannot leave the sweep
@@ -75,7 +75,7 @@ func New() (*Config, error) {
 	return &Config{dir: dir}, nil
 }
 
-// sweepTempFiles deletes writeFileDurable's abandoned scratch files from dir.
+// sweepTempFiles deletes WriteFileDurable's abandoned scratch files from dir.
 //
 // A crash between the CreateTemp and the rename — a panic, a kill -9, a power
 // loss — leaves a state.json.tmp-<random> behind, and nothing ever comes back
@@ -130,7 +130,7 @@ func (c *Config) statePath() string {
 	return filepath.Join(c.dir, stateFileName)
 }
 
-// writeFileDurable writes data to path via a temp file that is fsync'd before
+// WriteFileDurable writes data to path via a temp file that is fsync'd before
 // the rename. Without the fsync a crash can leave the rename committed while
 // the data is still only in the page cache, which is exactly how a power loss
 // turns a saved layout into a zero-length file. The containing directory is
@@ -146,7 +146,13 @@ func (c *Config) statePath() string {
 // perm is applied literally. os.WriteFile passes its mode to open(2), where the
 // umask filters it; a Chmod is not filtered, so callers get exactly the bits
 // they name — see statePerm.
-func writeFileDurable(path string, data []byte, perm os.FileMode) error {
+//
+// Exported so the other packages that publish a file into this same directory —
+// internal/settings, today — write it exactly the way the layout is written,
+// instead of each growing its own half of the fsync-and-rename dance. It also
+// means sweepTempFiles cleans up after all of them: every scratch file, whoever
+// wrote it, is named with the same tempSuffix the sweep globs for.
+func WriteFileDurable(path string, data []byte, perm os.FileMode) error {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+tempSuffix)
 	if err != nil {
 		return err
@@ -225,11 +231,11 @@ func (c *Config) SaveState(stateJSON string) error {
 		if json.Valid(prev) {
 			// A failed rotation is not fatal: saving the new state still beats
 			// refusing to save anything.
-			_ = writeFileDurable(path+bakSuffix, prev, statePerm)
+			_ = WriteFileDurable(path+bakSuffix, prev, statePerm)
 		}
 	}
 
-	return writeFileDurable(path, data, statePerm)
+	return WriteFileDurable(path, data, statePerm)
 }
 
 // LoadState reads the saved state JSON from disk. A state.json that exists but
@@ -367,7 +373,7 @@ func (c *Config) SaveWindowGeometry(g WindowGeometry) error {
 	// and it means no future write path can be added without being serialized.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return writeFileDurable(filepath.Join(c.dir, "window.json"), data, statePerm)
+	return WriteFileDurable(filepath.Join(c.dir, "window.json"), data, statePerm)
 }
 
 // LoadWindowGeometry reads the saved window geometry from disk.

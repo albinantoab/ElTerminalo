@@ -1,6 +1,7 @@
 import { TerminalPane, setLocalHostname } from './terminal/TerminalPane';
+import type { PaneOptions } from './terminal/TerminalPane';
 import { AppTheme, themeFromDTO, applyThemeToCSS } from './theme/themes';
-import { PaneInfo, SplitNode, Tab, SavedSplitNode, SavedState, CustomCommand, PaletteCommand } from './types';
+import { PaneInfo, SplitNode, Tab, SavedSplitNode, SavedState, SavedTab, CustomCommand, PaletteCommand } from './types';
 import { CommandPalette } from './palette/CommandPalette';
 import { CommandWizard } from './wizard/CommandWizard';
 import { ThemeWizard } from './wizard/ThemeWizard';
@@ -8,15 +9,21 @@ import { StateManager } from './state/StateManager';
 import { StatusModal } from './status/StatusModal';
 import { AskAI } from './ai/AskAI';
 import { HistoryModal } from './history/HistoryModal';
+import { FindBar } from './find/FindBar';
 import { escHtml, generateId, waitForLayout, utf8ToBase64 } from './utils';
 import {
   MAX_TABS, DOUBLE_CLICK_DELAY_MS, MIN_SPLIT_RATIO, MAX_SPLIT_RATIO,
   DEFAULT_SPLIT_RATIO, SPATIAL_NAV_THRESHOLD, STATE_SAVE_INTERVAL_MS,
-  MAX_DROP_PATHS, CMD,
+  MAX_DROP_PATHS, MAX_CLOSED_TABS, MIN_FONT_SIZE, MAX_FONT_SIZE,
+  SETTINGS_FONT_SIZE_MIN, SETTINGS_FONT_SIZE_MAX, MENU_ACTION_DEDUP_MS,
+  TITLE_REFRESH_DEBOUNCE_MS, BELL_FLASH_MS, BELL_COALESCE_MS, TAB_DRAG_MIME,
+  MODAL_PASSTHROUGH_META_KEYS, DEFAULT_SETTINGS, CMD,
 } from './constants';
 import { logError, logInfo } from './log';
 import './types/wails.d.ts';
-import type { PtyExitPayload, FilesDroppedPayload } from './types/wails.d.ts';
+import type {
+  PtyExitPayload, FilesDroppedPayload, Settings, MenuActionPayload, ThemesChangedPayload,
+} from './types/wails.d.ts';
 
 /** Cancel the webview's own drag and drop, from the moment the page exists.
  *
@@ -50,13 +57,24 @@ function installDropNavigationGuard(): void {
   // drop event. (A dragged file it accepts unasked — and then navigates to,
   // which is what the drop handler below exists to stop.)
   document.addEventListener('dragover', (e: DragEvent) => {
+    // A tab being dragged along the tab bar is the app's own gesture, not
+    // something arriving from outside it; the tab bar's own handlers decide
+    // where it may land, and claiming `copy` here would show the wrong cursor
+    // over every part of the window that is not a valid drop target.
+    if (isTabDrag(e)) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
   }, true);
 
   document.addEventListener('drop', (e: DragEvent) => {
+    if (isTabDrag(e)) return;
     e.preventDefault();
   }, true);
+}
+
+/** True when the drag in progress is one of this app's own tabs. */
+function isTabDrag(e: DragEvent): boolean {
+  return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes(TAB_DRAG_MIME);
 }
 
 // Before DOMContentLoaded, before init(), before the splash's first frame.
@@ -81,6 +99,60 @@ function severityClass(pct: number): string {
   return '';
 }
 
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+/** The last segment of a path, for naming a tab after the folder it is in.
+ *  `/` keeps its own name; a trailing slash is not a directory called "". */
+function basename(path: string): string {
+  const trimmed = path.replace(/\/+$/, '');
+  if (!trimmed) return path ? '/' : '';
+  return trimmed.slice(trimmed.lastIndexOf('/') + 1) || '/';
+}
+
+const CURSOR_STYLES: readonly Settings['cursorStyle'][] = ['block', 'underline', 'bar'];
+const BELL_MODES: readonly Settings['bell'][] = ['none', 'sound', 'visual', 'both'];
+const QUIT_MODES: readonly Settings['confirmQuit'][] = ['running', 'always', 'never'];
+
+/** Make whatever came back from GetSettings safe to hand to xterm.
+ *
+ *  The Go side validates config.json and fills its own defaults, so in the
+ *  normal case this changes nothing. It exists for the cases where that is not
+ *  what arrives: an older backend without the field, a binding that resolved
+ *  with something unexpected, a value that is valid on disk and still fatal
+ *  here. xterm does not ignore an option it dislikes — it *throws* on an
+ *  unknown `cursorStyle`, on `lineHeight` below 1, on negative `scrollback` —
+ *  and a throw inside the pane constructor takes the window with it. */
+function normalizeSettings(raw: Partial<Settings> | null | undefined): Settings {
+  const d = DEFAULT_SETTINGS;
+  const s = raw ?? {};
+  const str = (v: unknown, fallback: string): string =>
+    typeof v === 'string' && v.trim() !== '' ? v : fallback;
+  const bool = (v: unknown, fallback: boolean): boolean =>
+    typeof v === 'boolean' ? v : fallback;
+  const int = (v: unknown, fallback: number, lo: number, hi: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? clamp(Math.round(v), lo, hi) : fallback;
+  return {
+    fontFamily: str(s.fontFamily, d.fontFamily),
+    fontSize: int(s.fontSize, d.fontSize, SETTINGS_FONT_SIZE_MIN, SETTINGS_FONT_SIZE_MAX),
+    // xterm throws below 1, and a line height above 4 is a blank screen with
+    // occasional text in it.
+    lineHeight: typeof s.lineHeight === 'number' && Number.isFinite(s.lineHeight)
+      ? clamp(s.lineHeight, 1, 4) : d.lineHeight,
+    cursorStyle: CURSOR_STYLES.includes(s.cursorStyle as Settings['cursorStyle'])
+      ? s.cursorStyle as Settings['cursorStyle'] : d.cursorStyle,
+    cursorBlink: bool(s.cursorBlink, d.cursorBlink),
+    scrollback: int(s.scrollback, d.scrollback, 0, 1_000_000),
+    shell: typeof s.shell === 'string' ? s.shell : d.shell,
+    optionIsMeta: bool(s.optionIsMeta, d.optionIsMeta),
+    bell: BELL_MODES.includes(s.bell as Settings['bell']) ? s.bell as Settings['bell'] : d.bell,
+    copyOnSelect: bool(s.copyOnSelect, d.copyOnSelect),
+    confirmQuit: QUIT_MODES.includes(s.confirmQuit as Settings['confirmQuit'])
+      ? s.confirmQuit as Settings['confirmQuit'] : d.confirmQuit,
+  };
+}
+
 class ElTerminalo {
   private tabs: Tab[] = [];
   private activeTabIndex = 0;
@@ -88,6 +160,35 @@ class ElTerminalo {
   private currentTheme!: AppTheme;
   private customCommands: CustomCommand[] = [];
   private renamingTabIndex = -1;
+  // Everything from config.json, already normalized. Read once before the
+  // first pane exists, and again on "Reload Settings".
+  private settings: Settings = { ...DEFAULT_SETTINGS };
+  // Session-only font zoom, as an offset from the configured size — so a
+  // settings reload that changes the size keeps whatever zoom is in effect.
+  private zoomDelta = 0;
+  // The one find bar there is, or null. It belongs to the pane it was opened
+  // on; switching pane or tab takes it down.
+  private findBar: FindBar | null = null;
+  // Closed tabs, most recent last, for Cmd+Shift+T. Snapshots, not the tabs
+  // themselves: the panes are disposed the moment the tab goes.
+  private closedTabs: SavedTab[] = [];
+  // The last action that actually ran, and where it came from. A keyboard
+  // shortcut and its menu item name the same action, and this is what makes a
+  // double delivery impossible — see dispatchAction().
+  private lastAction: { name: string; at: number; source: 'key' | 'menu' } | null = null;
+  // The tab bar is rebuilt from scratch, and a shell redrawing its prompt
+  // reports a title and a directory in the same breath.
+  private titleRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  // The last title handed to the OS, so an unchanged one isn't sent again.
+  private lastWindowTitle = '';
+  // Per-pane visual-bell timers, keyed by the pane's element so a pane that
+  // goes away takes its entry with it.
+  private bellTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
+  // When each pane was last allowed to ring, keyed the same way. This is what
+  // makes a flood of BELs one bell — see handleBell().
+  private bellLastAt = new WeakMap<HTMLElement, number>();
+  // The tab being dragged along the tab bar, or -1.
+  private draggingTabIndex = -1;
 
   private container!: HTMLElement;
   private tabBar!: HTMLElement;
@@ -195,17 +296,9 @@ class ElTerminalo {
     const themeWizardOverlay = document.getElementById('theme-wizard-overlay')!;
     this.themeWizard = new ThemeWizard(themeWizardOverlay, {
       onSave: async () => {
-        const themeDTOs = await window.go.main.App.GetThemes();
-        this.themes = themeDTOs.map(themeFromDTO);
-        // Re-apply current theme in case it was edited
-        const updated = this.themes.find(t => t.name === this.currentTheme.name);
-        if (updated) {
-          this.currentTheme = updated;
-          applyThemeToCSS(updated);
-          for (const tab of this.tabs) {
-            for (const p of tab.panes) p.pane.setTheme(updated.xterm);
-          }
-        }
+        // Re-reads the list and re-applies the current theme in case the edit
+        // was to that one.
+        await this.refreshThemes();
       },
       focusActivePane: () => {
         if (this.panes[this.activeIndex]) this.panes[this.activeIndex].pane.focus();
@@ -247,6 +340,11 @@ class ElTerminalo {
 
     // Needed before any pane connects: OSC 7 reports are filtered by host.
     try { setLocalHostname(await window.go.main.App.GetHostname()); } catch { /* host-less reports still work */ }
+
+    // Before the first pane, because every pane is built from these: font,
+    // cursor, scrollback and the Option key are constructor arguments, not
+    // things to apply afterwards and watch reflow.
+    this.settings = await this.fetchSettings();
 
     const themeDTOs = await window.go.main.App.GetThemes();
     this.themes = themeDTOs.map(themeFromDTO);
@@ -314,6 +412,33 @@ class ElTerminalo {
       // rejection is not how this handler should end.
       window.go.main.App.ConfirmQuit().catch(() => {});
     });
+
+    // The native menu bar. Every item routes to the same function its keyboard
+    // shortcut does; dispatchAction() is what keeps one gesture from counting
+    // twice if the webview ever delivers a Cmd-key to both.
+    window.runtime.EventsOn('menu:action', (payload?: MenuActionPayload) => {
+      const action = typeof payload?.action === 'string' ? payload.action : '';
+      if (action) this.dispatchAction(action, 'menu');
+    });
+
+    // The theme files on disk changed — an import, or an edit made outside the
+    // app — and `name` is the one to end up on.
+    window.runtime.EventsOn('themes:changed', (payload?: ThemesChangedPayload) => {
+      const name = typeof payload?.name === 'string' ? payload.name : '';
+      this.refreshThemes(name).catch((e) => logError('Failed to reload the theme list', e));
+    });
+  }
+
+  /** Read config.json through the backend, normalized and never rejecting: a
+   *  window that will not start because a settings file could not be read is
+   *  worse than one running on the defaults. */
+  private async fetchSettings(): Promise<Settings> {
+    try {
+      return normalizeSettings(await window.go.main.App.GetSettings());
+    } catch (e) {
+      logError('Failed to read settings; using the defaults', e);
+      return { ...DEFAULT_SETTINGS };
+    }
   }
 
   /** What the app does with an HTML5 drop, once the module-level guard has
@@ -495,6 +620,7 @@ class ElTerminalo {
     if (this.stateSaveInterval) { clearInterval(this.stateSaveInterval); this.stateSaveInterval = null; }
     if (this.updateCheckInterval) { clearInterval(this.updateCheckInterval); this.updateCheckInterval = null; }
     if (this.statsInterval) { clearInterval(this.statsInterval); this.statsInterval = null; }
+    if (this.titleRefreshTimer) { clearTimeout(this.titleRefreshTimer); this.titleRefreshTimer = null; }
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     window.removeEventListener('focus', this.onWindowFocus);
     window.removeEventListener('blur', this.onWindowBlur);
@@ -610,7 +736,12 @@ class ElTerminalo {
   // --- Tab Management ---
 
   private async createTab(name?: string): Promise<void> {
-    if (this.tabs.length >= MAX_TABS) return;
+    // Not a silent no-op: nine is the limit because Cmd+1..9 is how tabs are
+    // reached, and a "+" that does nothing is a bug from where the user sits.
+    if (this.tabs.length >= MAX_TABS) {
+      this.notice(`[Maximum ${MAX_TABS} tabs]`);
+      return;
+    }
     let tabName = name;
     if (!tabName) {
       const used = new Set(this.tabs.map(t => t.name));
@@ -621,6 +752,8 @@ class ElTerminalo {
     const tab: Tab = {
       id: generateId('tab'),
       name: tabName,
+      renamed: false,
+      attention: false,
       panes: [],
       activeIndex: 0,
       layoutRoot: null,
@@ -655,6 +788,9 @@ class ElTerminalo {
 
     const wasVisible = index === this.activeTabIndex;
     const tab = this.tabs[index];
+    // Before anything is disposed: the snapshot is built from the panes.
+    this.snapshotClosedTab(tab);
+    if (this.findBar && tab.panes.some(p => p.pane === this.findBar!.pane)) this.closeFind();
     for (const p of tab.panes) {
       p.pane.dispose();
     }
@@ -685,8 +821,12 @@ class ElTerminalo {
 
   private switchToTab(index: number): void {
     if (index < 0 || index >= this.tabs.length) return;
+    // The bar belongs to a pane that is about to leave the screen.
+    this.closeFind();
     const outgoing = this.tab;
     this.activeTabIndex = index;
+    // Whatever rang while this tab was in the background has now been seen.
+    this.tab.attention = false;
     // Release the outgoing tab's GPU contexts *before* the incoming tab asks
     // for its own. Browsers cap how many WebGL contexts are alive at once and
     // silently drop the oldest to make room; overlapping the two tabs would
@@ -697,6 +837,10 @@ class ElTerminalo {
     this.renderTabBar();
     this.renderLayout();
     requestAnimationFrame(() => {
+      // Font options set while this tab was off screen were held back — xterm
+      // cannot measure a cell box in a detached element. Now it can, and the
+      // fit below has to run against the right one.
+      for (const p of this.panes) p.pane.flushOptions();
       this.fitAll();
       // After the fit: the renderer sizes its canvas from the terminal's
       // dimensions, so a context taken before the panes have their final size
@@ -722,24 +866,85 @@ class ElTerminalo {
   }
 
   private async renameTab(index: number, newName: string): Promise<void> {
-    if (index >= 0 && index < this.tabs.length && newName.trim()) {
-      this.tabs[index].name = newName.trim();
+    const tab = this.tabs[index];
+    const trimmed = newName.trim();
+    if (!tab || !trimmed) return;
+    // Confirming the name that was already on screen is not a rename. The
+    // field is pre-filled with whatever the tab is currently called, so a
+    // double-click and a click away would otherwise pin that name for good and
+    // cut the tab off from the shell that was keeping it up to date.
+    if (!tab.renamed && trimmed === this.tabDisplayName(tab, index)) {
       this.renderTabBar();
-      await this.stateManager.save();
+      return;
     }
+    tab.name = trimmed;
+    // From now on this tab is called what the user called it, whatever the
+    // shell has to say about its own title or its directory.
+    tab.renamed = true;
+    this.renderTabBar();
+    await this.stateManager.save();
+  }
+
+  /** What a tab is called on screen.
+   *
+   *  A name the user typed wins outright — they said what this tab is, and no
+   *  amount of `cd` changes that. Otherwise the active pane's own OSC 0/2 title
+   *  is the best answer, because a program that sets one (ssh, vim, a build) is
+   *  saying what it is doing. Failing that, the folder it is sitting in, which
+   *  is what most prompts would have shown anyway. And failing even that, the
+   *  placeholder the tab was born with. */
+  private tabDisplayName(tab: Tab, index: number): string {
+    if (tab.renamed && tab.name.trim()) return tab.name;
+    const active = tab.panes[tab.activeIndex] || tab.panes[0];
+    const title = active?.pane.title.trim();
+    if (title) return title;
+    const cwd = basename(active?.pane.cwd || '');
+    if (cwd) return cwd;
+    return tab.name || `Terminalo ${index + 1}`;
+  }
+
+  /** Coalesce the tab-bar rebuilds a burst of title/cwd reports would cause: a
+   *  prompt redraw sends both, and a `cd` in a loop sends one per iteration. */
+  private scheduleTitleRefresh(): void {
+    // Never while a tab is being renamed: rebuilding the bar would replace the
+    // input the user is typing into, mid-word.
+    if (this.renamingTabIndex >= 0 || this.titleRefreshTimer) return;
+    this.titleRefreshTimer = setTimeout(() => {
+      this.titleRefreshTimer = null;
+      if (this.renamingTabIndex >= 0) return;
+      this.renderTabBar();
+    }, TITLE_REFRESH_DEBOUNCE_MS);
+  }
+
+  /** Keep the window's title in step with the visible tab. The native title is
+   *  hidden behind the app's own titlebar, but it is what the Window menu and
+   *  the app switcher read, so both get the same string. */
+  private updateWindowTitle(): void {
+    const tab = this.tab;
+    const name = tab ? this.tabDisplayName(tab, this.activeTabIndex).trim() : '';
+    const title = name ? `${name} — El Terminalo` : 'El Terminalo';
+    const bar = document.getElementById('titlebar');
+    if (bar) bar.textContent = title;
+    if (title === this.lastWindowTitle) return;
+    this.lastWindowTitle = title;
+    window.go.main.App.SetWindowTitle(title).catch(() => {
+      // Cosmetic, and the titlebar above already says it.
+    });
   }
 
   private renderTabBar(): void {
     const tabs = this.tabs.map((t, i) => {
       const isActive = i === this.activeTabIndex;
+      const label = this.tabDisplayName(t, i);
       if (this.renamingTabIndex === i) {
         return `<div class="tab-item active">
-          <input class="tab-rename-input" type="text" value="${escHtml(t.name)}" data-index="${i}" />
+          <input class="tab-rename-input" type="text" value="${escHtml(label)}" data-index="${i}" />
         </div>`;
       }
-      return `<div class="tab-item ${isActive ? 'active' : ''}" data-index="${i}">
+      return `<div class="tab-item ${isActive ? 'active' : ''}" data-index="${i}" draggable="true">
         <span class="tab-shortcut">${i + 1}</span>
-        <span class="tab-name">${escHtml(t.name)}</span>
+        <span class="tab-name">${escHtml(label)}</span>
+        ${t.attention ? '<span class="tab-attention" title="Bell"></span>' : ''}
         ${this.tabs.length > 1 ? `<span class="tab-close" data-close="${i}">×</span>` : ''}
       </div>`;
     }).join('');
@@ -801,6 +1006,185 @@ class ElTerminalo {
     this.tabBar.querySelector('.tab-new')?.addEventListener('click', () => {
       this.createTab();
     });
+
+    this.wireTabDragging();
+    this.updateWindowTitle();
+  }
+
+  /** HTML5 drag to reorder tabs.
+   *
+   *  The drag carries a private MIME type, which is how the app tells its own
+   *  gesture apart from a file or a selection dropped in from outside: the
+   *  document-level guards installed at module load — the ones that stop a
+   *  dropped folder from navigating the whole window away — check for it and
+   *  stand aside. */
+  private wireTabDragging(): void {
+    const items = Array.from(this.tabBar.querySelectorAll('.tab-item[data-index]')) as HTMLElement[];
+    for (const el of items) {
+      const idx = parseInt(el.getAttribute('data-index') || '0', 10);
+
+      el.addEventListener('dragstart', (ev) => {
+        const e = ev as DragEvent;
+        if (!e.dataTransfer) return;
+        this.draggingTabIndex = idx;
+        e.dataTransfer.effectAllowed = 'move';
+        // The index travels in the drag itself as well as in the field above:
+        // the field is what the hover feedback reads, the payload is what the
+        // drop trusts.
+        e.dataTransfer.setData(TAB_DRAG_MIME, String(idx));
+        el.classList.add('tab-dragging');
+      });
+
+      el.addEventListener('dragend', () => {
+        this.draggingTabIndex = -1;
+        el.classList.remove('tab-dragging');
+        this.clearTabDropMarkers();
+      });
+
+      el.addEventListener('dragover', (ev) => {
+        const e = ev as DragEvent;
+        if (!isTabDrag(e)) return;
+        // Cancelling dragover is what makes this a drop target at all.
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        if (idx === this.draggingTabIndex) return;
+        this.clearTabDropMarkers();
+        el.classList.add(this.draggingTabIndex >= 0 && this.draggingTabIndex < idx
+          ? 'tab-drop-after' : 'tab-drop-before');
+      });
+
+      el.addEventListener('dragleave', () => {
+        el.classList.remove('tab-drop-before', 'tab-drop-after');
+      });
+
+      el.addEventListener('drop', (ev) => {
+        const e = ev as DragEvent;
+        if (!isTabDrag(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const from = parseInt(e.dataTransfer?.getData(TAB_DRAG_MIME) || '', 10);
+        this.draggingTabIndex = -1;
+        this.clearTabDropMarkers();
+        if (Number.isNaN(from)) return;
+        this.moveTab(from, idx);
+      });
+    }
+  }
+
+  private clearTabDropMarkers(): void {
+    this.tabBar.querySelectorAll('.tab-drop-before, .tab-drop-after').forEach(el => {
+      el.classList.remove('tab-drop-before', 'tab-drop-after');
+    });
+  }
+
+  /** Move a tab within the bar. The tab that was on screen stays on screen,
+   *  wherever the move left it — including when it is the one being moved. */
+  private moveTab(from: number, to: number): void {
+    if (from === to) return;
+    if (from < 0 || from >= this.tabs.length || to < 0 || to >= this.tabs.length) return;
+    const visible = this.tabs[this.activeTabIndex];
+    const [moved] = this.tabs.splice(from, 1);
+    this.tabs.splice(to, 0, moved);
+    this.activeTabIndex = Math.max(0, this.tabs.indexOf(visible));
+    // Only the bar changes: the panes on screen belong to the same tab they
+    // did a moment ago, so their DOM is left alone.
+    this.renderTabBar();
+    this.stateManager.save();
+  }
+
+  private cycleTab(delta: number): void {
+    const n = this.tabs.length;
+    if (n <= 1) return;
+    this.switchToTab(((this.activeTabIndex + delta) % n + n) % n);
+  }
+
+  /** Remember a tab on its way out, so Cmd+Shift+T can bring it back.
+   *
+   *  Called from closeTab() *before* the panes are disposed, and finished before
+   *  it returns: the snapshot is built from each pane's cached directory, with
+   *  no binding call to wait for. It used to be pushed from a `.then()` on
+   *  serializeLayout(), which probes the backend for a shell without
+   *  integration — and a Cmd+W followed straight away by Cmd+Shift+T then popped
+   *  a stack the snapshot had not reached yet, so the tab the user had just
+   *  closed was simply not there. */
+  private snapshotClosedTab(tab: Tab): void {
+    if (!tab.layoutRoot) return;
+    this.closedTabs.push({
+      name: tab.name,
+      renamed: tab.renamed,
+      layout: this.stateManager.serializeLayoutSync(tab.layoutRoot),
+    });
+    // Oldest first out: the point of the stack is the last few minutes.
+    while (this.closedTabs.length > MAX_CLOSED_TABS) this.closedTabs.shift();
+  }
+
+  /** Cmd+Shift+T: rebuild the tab that was closed last, at the end of the bar.
+   *
+   *  Runs under the same `restoring` guard a launch-time restore does: the
+   *  layout is half-built for as long as its panes are connecting, and a save
+   *  taken in the middle of that would write a window that never existed. One
+   *  save happens at the end, when it is whole. */
+  private async reopenClosedTab(): Promise<void> {
+    // Not while another rebuild is in flight — the launch-time restore, or a
+    // second Cmd+Shift+T on top of this one. Both would be writing to the same
+    // guard and to activeTabIndex at the same time.
+    if (this.restoring) return;
+    if (this.tabs.length >= MAX_TABS) {
+      this.notice(`[Maximum ${MAX_TABS} tabs]`);
+      return;
+    }
+    // Peeked, not popped: a rebuild that fails must leave the entry where it
+    // was, so the next Cmd+Shift+T tries the same tab again rather than skipping
+    // past it to an older one — or, on an empty stack, to nothing at all.
+    const saved = this.closedTabs[this.closedTabs.length - 1];
+    if (!saved) return;
+
+    const tab: Tab = {
+      id: generateId('tab'),
+      name: saved.name,
+      renamed: !!saved.renamed,
+      attention: false,
+      panes: [],
+      activeIndex: 0,
+      layoutRoot: null,
+    };
+    this.tabs.push(tab);
+    this.activeTabIndex = this.tabs.length - 1;
+
+    this.restoring = true;
+    try {
+      tab.layoutRoot = await this.restoreLayoutNode(saved.layout, tab);
+    } catch (e) {
+      logError(`Failed to reopen the closed tab "${saved.name}"`, e);
+    } finally {
+      this.restoring = false;
+    }
+
+    if (!tab.layoutRoot) {
+      // Nothing came back — don't leave an empty tab behind, and leave the
+      // snapshot on the stack: the tab was not reopened, so it is still closed.
+      for (const p of tab.panes) p.pane.dispose();
+      const idx = this.tabs.indexOf(tab);
+      if (idx >= 0) this.tabs.splice(idx, 1);
+      this.activeTabIndex = Math.min(this.activeTabIndex, this.tabs.length - 1);
+      this.switchToTab(this.activeTabIndex);
+      return;
+    }
+
+    // Rebuilt: only now does the entry leave the stack. By identity rather than
+    // by popping — a background shell exiting during the rebuild closes its own
+    // tab and pushes a newer snapshot on top of this one.
+    const used = this.closedTabs.lastIndexOf(saved);
+    if (used >= 0) this.closedTabs.splice(used, 1);
+
+    this.renderTabBar();
+    this.renderLayout();
+    await waitForLayout();
+    this.fitAll();
+    this.syncWebgl();
+    this.setActive(0);
+    this.stateManager.save();
   }
 
   // --- State Persistence ---
@@ -815,7 +1199,7 @@ class ElTerminalo {
       if (!state.tabs && state.layout) {
         // v1 migration: single layout -> single tab
         applyThemeToCSS(this.currentTheme);
-        const tab: Tab = { id: 'tab-migrated', name: 'Terminal', panes: [], activeIndex: 0, layoutRoot: null };
+        const tab: Tab = { id: 'tab-migrated', name: 'Terminal', renamed: false, attention: false, panes: [], activeIndex: 0, layoutRoot: null };
         this.tabs.push(tab);
         this.activeTabIndex = 0;
         tab.layoutRoot = await this.restoreLayoutNode(state.layout, tab);
@@ -837,6 +1221,10 @@ class ElTerminalo {
         const tab: Tab = {
           id: generateId('tab'),
           name: savedTab.name,
+          // Absent in state written before this existed — and rightly false
+          // there, since those tabs were never renamed by hand.
+          renamed: !!savedTab.renamed,
+          attention: false,
           panes: [],
           activeIndex: 0,
           layoutRoot: null,
@@ -922,7 +1310,9 @@ class ElTerminalo {
     el.className = 'pane-leaf';
     el.style.flex = '1';
 
-    const pane = new TerminalPane(el, this.currentTheme.xterm);
+    // A new pane is never the active one yet — setActive() turns its cursor on
+    // a moment later — so it is built with the blink off.
+    const pane = new TerminalPane(el, this.currentTheme.xterm, this.paneOptions(false));
     const id = generateId('pane');
     const info: PaneInfo = { id, pane, element: el };
 
@@ -933,6 +1323,14 @@ class ElTerminalo {
     });
 
     pane.onExit = (exit) => this.handlePaneExit(info, exit);
+
+    pane.onBell = () => this.handleBell(info, tab);
+
+    // OSC 0/2 titles and OSC 7 directories both feed the tab's name, and both
+    // arrive on every prompt.
+    pane.onTitleChange = () => {
+      if (tab === this.tab && tab.panes[tab.activeIndex] === info) this.scheduleTitleRefresh();
+    };
 
     pane.smartRender.onBadgesChanged = () => this.renderStatusBar();
 
@@ -952,6 +1350,9 @@ class ElTerminalo {
 
     el.addEventListener('mousedown', (e) => {
       if (e.button === 2) return; // don't steal focus on right-click
+      // The find bar lives inside the pane; clicking its field or its buttons
+      // must not hand the keyboard straight back to the terminal.
+      if ((e.target as HTMLElement | null)?.closest('.find-bar')) return;
       const idx = tab.panes.indexOf(info);
       if (idx >= 0 && tab === this.tab) this.setActive(idx);
     });
@@ -1096,6 +1497,7 @@ class ElTerminalo {
 
     const removedIdx = tab.panes.indexOf(target);
     tab.panes.splice(removedIdx, 1);
+    if (this.findBar?.pane === target.pane) this.closeFind();
     target.pane.dispose();
 
     // Keep the focus where it was: everything after the hole shifts down one.
@@ -1187,15 +1589,21 @@ class ElTerminalo {
 
   private setActive(index: number): void {
     if (index < 0 || index >= this.panes.length) return;
+    // One find bar, on the pane the user is in. Moving out of that pane closes
+    // it rather than leaving a search field hanging over a terminal nobody is
+    // typing into.
+    if (this.findBar && this.findBar.pane !== this.panes[index].pane) this.closeFind();
     for (const p of this.panes) {
       p.element.classList.remove('active');
       p.pane.terminal.options.cursorBlink = false;
     }
     this.activeIndex = index;
     this.panes[index].element.classList.add('active');
-    this.panes[index].pane.terminal.options.cursorBlink = true;
+    this.panes[index].pane.terminal.options.cursorBlink = this.settings.cursorBlink;
     this.panes[index].pane.focus();
     this.renderStatusBar();
+    // The tab is named after this pane, and it just changed which pane that is.
+    this.scheduleTitleRefresh();
   }
 
   // --- Theme ---
@@ -1208,8 +1616,198 @@ class ElTerminalo {
     for (const tab of this.tabs) {
       for (const p of tab.panes) p.pane.setTheme(theme.xterm);
     }
+    // The find bar reads its highlight colours from the CSS variables when it
+    // opens, and the addon bakes them into decorations that are already drawn —
+    // so a bar left open across a theme switch keeps the old theme's highlights
+    // until it is told to build them again.
+    this.findBar?.refreshTheme();
     this.renderStatusBar();
     this.stateManager.save();
+  }
+
+  /** Re-read the themes on disk, and land on `selectName` when one is asked
+   *  for. Shared by the theme wizard, the `themes:changed` event and importing
+   *  a color scheme — all three change the same list under the same window. */
+  private async refreshThemes(selectName?: string): Promise<void> {
+    const themeDTOs = await window.go.main.App.GetThemes();
+    this.themes = themeDTOs.map(themeFromDTO);
+    if (selectName && this.themes.some(t => t.name.toLowerCase() === selectName.toLowerCase())) {
+      this.setTheme(selectName);
+      return;
+    }
+    // No new theme to switch to — but the current one may itself have been
+    // rewritten, so it is re-applied rather than left as the stale copy this
+    // window is holding.
+    const updated = this.themes.find(t => t.name === this.currentTheme?.name);
+    if (!updated) return;
+    this.currentTheme = updated;
+    applyThemeToCSS(updated);
+    for (const tab of this.tabs) {
+      for (const p of tab.panes) p.pane.setTheme(updated.xterm);
+    }
+  }
+
+  /** Ask the backend to import a color scheme file. A cancelled dialog returns
+   *  "" and is not an error; a file that cannot be parsed rejects, and that is
+   *  said in the pane rather than only in the log.
+   *
+   *  A successful import needs nothing more from here: writing the theme makes
+   *  the Go side emit `themes:changed` with the new name, and the handler for
+   *  that calls refreshThemes(name) — the same call this used to make itself,
+   *  one GetThemes round trip and one whole-window re-theme earlier. */
+  private async importColorScheme(): Promise<void> {
+    try {
+      await window.go.main.App.ImportColorScheme();
+    } catch (e) {
+      logError('Failed to import a color scheme', e);
+      this.notice(`[Could not import that color scheme: ${e instanceof Error ? e.message : String(e)}]`);
+    }
+  }
+
+  // --- Settings, zoom and the bell ---
+
+  /** The effective terminal font size: what config.json asks for, plus the
+   *  session's zoom. Unzoomed, the configured size is used exactly as written
+   *  — the bounds belong to the zoom, not to the setting, and config.json is
+   *  allowed to ask for sizes no amount of Cmd+= would reach. */
+  private get fontSize(): number {
+    if (this.zoomDelta === 0) return this.settings.fontSize;
+    return clamp(this.settings.fontSize + this.zoomDelta, MIN_FONT_SIZE, MAX_FONT_SIZE);
+  }
+
+  /** The xterm options a pane should be running with right now. `active`
+   *  decides the cursor blink and nothing else: only the focused pane blinks,
+   *  whatever the setting says, or a four-way split becomes a light show. */
+  private paneOptions(active: boolean): PaneOptions {
+    return {
+      fontFamily: this.settings.fontFamily,
+      fontSize: this.fontSize,
+      lineHeight: this.settings.lineHeight,
+      cursorStyle: this.settings.cursorStyle,
+      cursorBlink: active && this.settings.cursorBlink,
+      scrollback: this.settings.scrollback,
+      macOptionIsMeta: this.settings.optionIsMeta,
+      copyOnSelect: this.settings.copyOnSelect,
+    };
+  }
+
+  /** Push the current settings into every pane in every tab, then re-fit the
+   *  ones on screen — which is what tells their shells the new size. Panes in
+   *  background tabs hold their font back until their tab is next shown; see
+   *  TerminalPane.applyOptions(). */
+  private applySettingsToPanes(): void {
+    for (const tab of this.tabs) {
+      for (let i = 0; i < tab.panes.length; i++) {
+        const isActive = tab === this.tab && i === this.activeIndex;
+        tab.panes[i].pane.applyOptions(this.paneOptions(isActive));
+      }
+    }
+    this.fitAll();
+  }
+
+  /** "Reload Settings": re-read the file and apply it to the running window. */
+  private async reloadSettings(): Promise<void> {
+    this.settings = await this.fetchSettings();
+    this.applySettingsToPanes();
+  }
+
+  /** Session-only font zoom. Deliberately not persisted: zoom is what the user
+   *  needs for the next ten minutes, and the size they actually want lives in
+   *  config.json — which is what Cmd+0 goes back to. */
+  private zoomBy(delta: number): void {
+    const current = this.fontSize;
+    const next = clamp(current + delta, MIN_FONT_SIZE, MAX_FONT_SIZE);
+    // A configured size outside the zoom range can only be moved *into* it: a
+    // 72px setting must not be made bigger by Cmd+= clamping it down to 40.
+    if (next === current || Math.sign(next - current) !== Math.sign(delta)) return;
+    this.zoomDelta = next - this.settings.fontSize;
+    this.applySettingsToPanes();
+  }
+
+  private zoomReset(): void {
+    if (this.zoomDelta === 0) return;
+    this.zoomDelta = 0;
+    this.applySettingsToPanes();
+  }
+
+  /** A pane rang the bell. What that means is the user's to configure, and the
+   *  attention dot exists because the pane that rang is often not the one being
+   *  looked at — a long build in a background tab is the whole point of a bell.
+   *
+   *  Coalesced per pane, before anything else happens. xterm has no BEL throttle
+   *  of its own, so every BEL byte the shell writes arrives here: `cat` of a
+   *  binary is thousands in a second, and each one would be a binding call, a
+   *  system alert sound and a border flash. Bells inside the window are dropped
+   *  rather than queued — replaying eight thousand of them afterwards would say
+   *  nothing the first one didn't. (The Go side rate-limits the sound as well;
+   *  this is the half that keeps the calls off the bridge to begin with.) */
+  private handleBell(info: PaneInfo, tab: Tab): void {
+    const mode = this.settings.bell;
+    if (mode === 'none') return;
+
+    const now = performance.now();
+    const since = this.bellLastAt.get(info.element);
+    if (since !== undefined && now - since < BELL_COALESCE_MS) return;
+    this.bellLastAt.set(info.element, now);
+
+    if (mode === 'sound' || mode === 'both') {
+      window.go.main.App.Bell().catch(() => { /* a bell nobody hears is not an error */ });
+    }
+    if (mode !== 'visual' && mode !== 'both') return;
+
+    const el = info.element;
+    el.classList.add('bell-flash');
+    const running = this.bellTimers.get(el);
+    if (running) clearTimeout(running);
+    this.bellTimers.set(el, setTimeout(() => {
+      this.bellTimers.delete(el);
+      el.classList.remove('bell-flash');
+    }, BELL_FLASH_MS));
+
+    if (tab !== this.tab && !tab.attention) {
+      tab.attention = true;
+      this.renderTabBar();
+    }
+  }
+
+  // --- Find in scrollback ---
+
+  /** Cmd+F. One bar at a time, on the active pane; a second Cmd+F while it is
+   *  open puts the keyboard back in the field with the term selected, so the
+   *  next thing typed replaces it. */
+  private openFind(): void {
+    // Never behind a dialog. The bar takes the keyboard the moment it exists, so
+    // opening one under the palette or the AI prompt would leave the user typing
+    // into a field they cannot see.
+    if (this.isModalOpen()) return;
+    const info = this.panes[this.activeIndex];
+    if (!info) return;
+    if (this.findBar?.pane === info.pane) {
+      this.findBar.focusInput();
+      return;
+    }
+    this.closeFind();
+    this.findBar = new FindBar(info.element, info.pane, {
+      onClose: () => {
+        this.findBar = null;
+        this.focusActivePane();
+      },
+    });
+  }
+
+  /** Take the bar down without moving the focus — the caller is already moving
+   *  it somewhere (another pane, another tab), or the pane is going away. */
+  private closeFind(): void {
+    const bar = this.findBar;
+    if (!bar) return;
+    this.findBar = null;
+    bar.dispose();
+  }
+
+  /** Say something in the pane the user is looking at, on the app's own behalf. */
+  private notice(text: string): void {
+    const pane = this.panes[this.activeIndex] || this.panes[0];
+    pane?.pane.writeNotice(text);
   }
 
   // --- Status Bar ---
@@ -1238,17 +1836,17 @@ class ElTerminalo {
     this.statusbar.innerHTML = `
       <div class="status-left">${updateBadge}${leftSep}${statsBadge}</div>
       <div class="status-right">
-        <span class="status-key">${CMD.AI_COMMAND.shortcut}</span><span class="status-label">ai</span>
-        <span class="status-sep">|</span>
         <span class="status-key">${CMD.COMMAND_PALETTE.shortcut}</span><span class="status-label">cmds</span>
         <span class="status-sep">|</span>
-        <span class="status-key">${CMD.SESSION_STATUS.shortcut}</span><span class="status-label">status</span>
+        <span class="status-key">${CMD.AI_COMMAND.shortcut}</span><span class="status-label">ai</span>
+        <span class="status-sep">|</span>
+        <span class="status-key">${CMD.FIND.shortcut}</span><span class="status-label">find</span>
+        <span class="status-sep">|</span>
+        <span class="status-key">${CMD.NEW_TAB.shortcut}</span><span class="status-label">tab</span>
         <span class="status-sep">|</span>
         <span class="status-key">${CMD.SPLIT_VERTICAL.shortcut}</span><span class="status-label">vsplit</span>
         <span class="status-sep">|</span>
         <span class="status-key">${CMD.SPLIT_HORIZONTAL.shortcut}</span><span class="status-label">hsplit</span>
-        <span class="status-sep">|</span>
-        <span class="status-key">${CMD.CLOSE_PANE.shortcut}</span><span class="status-label">close</span>
         <span class="status-sep">|</span>
         <span class="status-key">${CMD.CLEAR_TERMINAL.shortcut}</span><span class="status-label">clear</span>
       </div>
@@ -1323,6 +1921,9 @@ class ElTerminalo {
       { name: CMD.NEW_TAB.name, desc: CMD.NEW_TAB.desc, category: CMD.NEW_TAB.category, shortcutDisplay: CMD.NEW_TAB.shortcut, action: () => this.createTab() },
       { name: CMD.CLOSE_TAB.name, desc: CMD.CLOSE_TAB.desc, category: CMD.CLOSE_TAB.category, shortcutDisplay: CMD.CLOSE_TAB.shortcut, action: () => this.confirmCloseTab(this.activeTabIndex) },
       { name: CMD.RENAME_TAB.name, desc: CMD.RENAME_TAB.desc, category: CMD.RENAME_TAB.category, action: () => { this.palette.hide(); this.renamingTabIndex = this.activeTabIndex; this.renderTabBar(); } },
+      { name: CMD.NEXT_TAB.name, desc: CMD.NEXT_TAB.desc, category: CMD.NEXT_TAB.category, shortcutDisplay: CMD.NEXT_TAB.shortcut, action: () => this.cycleTab(1) },
+      { name: CMD.PREV_TAB.name, desc: CMD.PREV_TAB.desc, category: CMD.PREV_TAB.category, shortcutDisplay: CMD.PREV_TAB.shortcut, action: () => this.cycleTab(-1) },
+      { name: CMD.REOPEN_TAB.name, desc: CMD.REOPEN_TAB.desc, category: CMD.REOPEN_TAB.category, shortcutDisplay: CMD.REOPEN_TAB.shortcut, action: () => { this.reopenClosedTab().catch(e => logError('Failed to reopen the closed tab', e)); } },
       { name: CMD.SPLIT_VERTICAL.name, desc: CMD.SPLIT_VERTICAL.desc, category: CMD.SPLIT_VERTICAL.category, shortcutDisplay: CMD.SPLIT_VERTICAL.shortcut, action: () => this.splitPane('vertical') },
       { name: CMD.SPLIT_HORIZONTAL.name, desc: CMD.SPLIT_HORIZONTAL.desc, category: CMD.SPLIT_HORIZONTAL.category, shortcutDisplay: CMD.SPLIT_HORIZONTAL.shortcut, action: () => this.splitPane('horizontal') },
       { name: CMD.CLOSE_PANE.name, desc: CMD.CLOSE_PANE.desc, category: CMD.CLOSE_PANE.category, shortcutDisplay: CMD.CLOSE_PANE.shortcut, action: () => this.confirmCloseActivePane() },
@@ -1336,6 +1937,7 @@ class ElTerminalo {
       { name: CMD.SESSION_STATUS.name, desc: CMD.SESSION_STATUS.desc, category: CMD.SESSION_STATUS.category, shortcutDisplay: CMD.SESSION_STATUS.shortcut, action: () => { this.closePaletteIfOpen(); this.statusModal.show(); } },
       { name: CMD.COMMAND_PALETTE.name, desc: CMD.COMMAND_PALETTE.desc, category: CMD.COMMAND_PALETTE.category, shortcutDisplay: CMD.COMMAND_PALETTE.shortcut, action: () => this.palette.show() },
       { name: CMD.CLEAR_TERMINAL.name, desc: CMD.CLEAR_TERMINAL.desc, category: CMD.CLEAR_TERMINAL.category, shortcutDisplay: CMD.CLEAR_TERMINAL.shortcut, action: () => this.clearActiveTerminal() },
+      { name: CMD.FIND.name, desc: CMD.FIND.desc, category: CMD.FIND.category, shortcutDisplay: CMD.FIND.shortcut, action: () => { this.closePaletteIfOpen(); this.openFind(); } },
       { name: CMD.REVEAL_LOGS.name, desc: CMD.REVEAL_LOGS.desc, category: CMD.REVEAL_LOGS.category, action: () => { this.closePaletteIfOpen(); this.revealLogs(); } },
       { name: CMD.COPY_LAST_OUTPUT.name, desc: CMD.COPY_LAST_OUTPUT.desc, category: CMD.COPY_LAST_OUTPUT.category, action: () => { const output = this.panes[this.activeIndex]?.pane.shellIntegration.getLastCommandOutput(); if (output) navigator.clipboard.writeText(output); this.closePaletteIfOpen(); } },
       { name: CMD.CREATE_COMMAND.name, desc: CMD.CREATE_COMMAND.desc, category: CMD.CREATE_COMMAND.category, shortcutDisplay: CMD.CREATE_COMMAND.shortcut, action: () => { this.palette.hide(); const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || ''; this.wizard.show(input); } },
@@ -1359,6 +1961,12 @@ class ElTerminalo {
         action: () => this.setTheme(t.name),
       })),
       { name: 'Create Theme', desc: 'Design a new color theme', category: 'Appearance', action: () => { this.closePaletteIfOpen(); this.themeWizard.show(); } },
+      { name: CMD.IMPORT_SCHEME.name, desc: CMD.IMPORT_SCHEME.desc, category: CMD.IMPORT_SCHEME.category, action: () => { this.closePaletteIfOpen(); this.importColorScheme(); } },
+      { name: CMD.ZOOM_IN.name, desc: CMD.ZOOM_IN.desc, category: CMD.ZOOM_IN.category, shortcutDisplay: CMD.ZOOM_IN.shortcut, action: () => this.zoomBy(1) },
+      { name: CMD.ZOOM_OUT.name, desc: CMD.ZOOM_OUT.desc, category: CMD.ZOOM_OUT.category, shortcutDisplay: CMD.ZOOM_OUT.shortcut, action: () => this.zoomBy(-1) },
+      { name: CMD.ZOOM_RESET.name, desc: CMD.ZOOM_RESET.desc, category: CMD.ZOOM_RESET.category, shortcutDisplay: CMD.ZOOM_RESET.shortcut, action: () => this.zoomReset() },
+      { name: CMD.OPEN_SETTINGS.name, desc: CMD.OPEN_SETTINGS.desc, category: CMD.OPEN_SETTINGS.category, action: () => { this.closePaletteIfOpen(); window.go.main.App.OpenSettingsFile().catch(e => logError('Failed to open config.json', e)); } },
+      { name: CMD.RELOAD_SETTINGS.name, desc: CMD.RELOAD_SETTINGS.desc, category: CMD.RELOAD_SETTINGS.category, action: () => { this.reloadSettings().catch(e => logError('Failed to reload settings', e)); } },
     ];
   }
 
@@ -1386,6 +1994,11 @@ class ElTerminalo {
       }
     } catch (e) {
       logError(`Failed to delete theme "${themeName}"`, e);
+      // Same failure as a refused save: the backend will not rewrite a
+      // themes.json it could not read, and says which file it means. The theme
+      // is still in the list and the palette is closing, so the pane is the only
+      // place left to say so.
+      this.notice(`[Could not delete "${themeName}": ${e instanceof Error ? e.message : String(e)}]`);
     }
   }
 
@@ -1587,6 +2200,90 @@ class ElTerminalo {
 
   // --- Keyboard ---
 
+  /** Run one of the app's named actions. Both the keyboard and the native menu
+   *  bar arrive here, and both name the same actions, because a menu item and
+   *  its shortcut have to do exactly one thing — the same thing.
+   *
+   *  WKWebView routes a Cmd-key to the page or to the menu, never to both, and
+   *  the window below exists because "never" is a claim about a webview rather
+   *  than something this app can check. A second arrival of the same action
+   *  from the *other* source inside it is one gesture counted twice, and is
+   *  dropped. Two arrivals from the same source are two presses — holding
+   *  Cmd+= to zoom is exactly that — and always run. */
+  private dispatchAction(action: string, source: 'key' | 'menu'): void {
+    // Nothing the menu bar can ask for happens behind a dialog. The keyboard
+    // half of this never gets here — handleKeydown gives the modal the event and
+    // cancels it — but a menu item reaches the frontend through an event, with
+    // no keystroke to cancel: either the user picked it with the mouse while a
+    // dialog was up, or the webview let the accelerator through to the menu
+    // after all. Both would close the tab, split the pane or open the find bar
+    // *behind* whatever the user is actually typing into.
+    if (source === 'menu' && this.isModalOpen()) {
+      logInfo(`Ignoring menu action "${action}": a dialog is over the panes`);
+      return;
+    }
+
+    const now = performance.now();
+    const last = this.lastAction;
+    if (last && last.name === action && last.source !== source && now - last.at < MENU_ACTION_DEDUP_MS) {
+      return;
+    }
+    this.lastAction = { name: action, at: now, source };
+
+    switch (action) {
+      case 'new-tab': this.createTab(); return;
+      case 'close-tab': this.confirmCloseTab(this.activeTabIndex); return;
+      case 'close-pane': this.confirmCloseActivePane(); return;
+      case 'split-vertical': this.splitPane('vertical'); return;
+      case 'split-horizontal': this.splitPane('horizontal'); return;
+      case 'find': this.openFind(); return;
+      case 'clear': this.clearActiveTerminal(); return;
+      case 'zoom-in': this.zoomBy(1); return;
+      case 'zoom-out': this.zoomBy(-1); return;
+      case 'zoom-reset': this.zoomReset(); return;
+      case 'next-tab': this.cycleTab(1); return;
+      case 'prev-tab': this.cycleTab(-1); return;
+      case 'reopen-tab':
+        this.reopenClosedTab().catch(e => logError('Failed to reopen the closed tab', e));
+        return;
+      case 'palette': this.palette.show(); return;
+      case 'status': this.statusModal.show(); return;
+      case 'history': this.historyModal.show(); return;
+      case 'reload-settings':
+        this.reloadSettings().catch(e => logError('Failed to reload settings', e));
+        return;
+      case 'import-scheme': this.importColorScheme(); return;
+      default:
+        // A menu built against a newer frontend than this one. Nothing to do,
+        // but worth a line: it is the only sign the two have drifted apart.
+        logInfo(`Ignoring unknown menu action "${action}"`);
+    }
+  }
+
+  /** End a Cmd-key here, so the native menu never gets a second look at it.
+   *
+   *  A dialog is over the panes and the event has just been offered to it. If it
+   *  wanted the key it cancelled the event itself (every modal calls
+   *  preventDefault on the combos it handles, the palette's Cmd+E and Cmd+D
+   *  included) and there is nothing left to do. If it did not, the key must
+   *  still stop here: WKWebView's performKeyEquivalent: gives the page the first
+   *  pass, and when the page leaves the event un-prevented WebKit re-injects it
+   *  so the main menu's accelerator can fire. `stopPropagation` does not count —
+   *  only `defaultPrevented` does. That second pass is how Cmd+W closes the tab
+   *  behind an open AI prompt, and Cmd+F opens a find bar underneath it.
+   *
+   *  Two kinds of key are deliberately let past. Ctrl and Alt combos, because
+   *  none of this app's own shortcuts use them and ⌃⌘F is the menu's Toggle Full
+   *  Screen. And the roles' own items — the Edit menu, which is the only reason
+   *  Cmd+C/V/X/A reach a focused text field in a webview at all, and Quit, Hide
+   *  and Minimize, which have to work whatever is on screen. */
+  private sealMetaKey(e: KeyboardEvent): void {
+    if (!e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.defaultPrevented) return;
+    if (MODAL_PASSTHROUGH_META_KEYS.has(e.key.toLowerCase())) return;
+    e.preventDefault();
+  }
+
   private handleKeydown(e: KeyboardEvent): void {
     const isMeta = e.metaKey;
 
@@ -1603,6 +2300,7 @@ class ElTerminalo {
     if (this.historyModal.isOpen()) {
       e.stopPropagation();
       this.historyModal.handleKeydown(e);
+      this.sealMetaKey(e);
       return;
     }
 
@@ -1610,12 +2308,14 @@ class ElTerminalo {
     if (this.statusModal.isOpen()) {
       e.stopPropagation();
       this.statusModal.handleKeydown(e);
+      this.sealMetaKey(e);
       return;
     }
 
     // Theme wizard takes highest priority
     if (this.themeWizard.isOpen()) {
       this.themeWizard.handleKeydown(e);
+      this.sealMetaKey(e);
       return;
     }
 
@@ -1623,6 +2323,7 @@ class ElTerminalo {
     if (this.wizard.isOpen()) {
       e.stopPropagation();
       this.wizard.handleKeydown(e);
+      this.sealMetaKey(e);
       return;
     }
 
@@ -1630,14 +2331,22 @@ class ElTerminalo {
     if (this.askAI.isOpen()) {
       e.stopPropagation();
       this.askAI.handleKeydown(e);
+      this.sealMetaKey(e);
       return;
     }
 
     // Palette takes second priority
     if (this.palette.isOpen()) {
       this.palette.handleKeydown(e);
+      this.sealMetaKey(e);
       return;
     }
+
+    // The find bar, when there is one. It claims only what it needs — the
+    // typing in its own field, Enter, Escape, and Cmd+G from anywhere — and
+    // lets every other shortcut past, so Cmd+T still opens a tab with the
+    // cursor in the search field.
+    if (this.findBar?.handleKeydown(e)) return;
 
     // Custom command shortcuts (checked first — they use Ctrl/Alt combos
     // that don't overlap with built-in Cmd shortcuts)
@@ -1671,8 +2380,27 @@ class ElTerminalo {
     // Ctrl+L is not intercepted: vim, less, tmux and Claude Code all bind it,
     // so it belongs to the foreground program. Cmd+L is this app's own clear.
 
-    // Built-in shortcuts (Cmd-based)
-    if (isMeta) {
+    // Ctrl+Tab / Ctrl+Shift+Tab cycle tabs, as they do everywhere else on the
+    // desktop. This one has to leave the event stream entirely rather than
+    // merely be cancelled: xterm turns Ctrl+Tab into a literal tab character
+    // for the shell, and it reads the event rather than asking whether anyone
+    // else already dealt with it — only never reaching its listener stops that.
+    if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Tab') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this.dispatchAction(e.shiftKey ? 'prev-tab' : 'next-tab', 'key');
+      return;
+    }
+
+    // Built-in shortcuts (Cmd-based).
+    //
+    // Ctrl and Alt held is somebody else's gesture, and the test has to be here
+    // rather than on each binding: cancelling ⌃⌘F to open the find bar is what
+    // stopped Toggle Full Screen from ever firing, because a Cmd-key the page
+    // prevents is one the main menu is never offered. None of the app's own
+    // shortcuts use either modifier — the ones that do are custom commands, and
+    // they are matched above, with their modifiers spelled out.
+    if (isMeta && !e.ctrlKey && !e.altKey) {
       if (e.shiftKey && e.key.toLowerCase() === 'c') {
         e.preventDefault();
         const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || '';
@@ -1681,12 +2409,39 @@ class ElTerminalo {
       }
       if (e.shiftKey && e.key.toLowerCase() === 'r') {
         e.preventDefault();
-        this.historyModal.show();
+        this.dispatchAction('history', 'key');
+        return;
+      }
+      if (e.shiftKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        this.dispatchAction('split-horizontal', 'key');
+        return;
+      }
+      if (e.shiftKey && e.key.toLowerCase() === 't') {
+        e.preventDefault();
+        this.dispatchAction('reopen-tab', 'key');
         return;
       }
       if (e.shiftKey && e.key === '\\') {
         e.preventDefault();
-        this.splitPane('vertical');
+        this.dispatchAction('split-vertical', 'key');
+        return;
+      }
+      // With Shift held a US layout reports `}` / `{` / `+`, not the unshifted
+      // key; both spellings are accepted so a layout that reports either works.
+      if (e.shiftKey && (e.key === ']' || e.key === '}')) {
+        e.preventDefault();
+        this.dispatchAction('next-tab', 'key');
+        return;
+      }
+      if (e.shiftKey && (e.key === '[' || e.key === '{')) {
+        e.preventDefault();
+        this.dispatchAction('prev-tab', 'key');
+        return;
+      }
+      if (e.shiftKey && (e.key === '+' || e.key === '=')) {
+        e.preventDefault();
+        this.dispatchAction('zoom-in', 'key');
         return;
       }
       if (e.shiftKey && e.key === 'ArrowUp') {
@@ -1701,19 +2456,29 @@ class ElTerminalo {
       }
       if (e.shiftKey && e.key.toLowerCase() === 'x') {
         e.preventDefault();
-        this.confirmCloseActivePane();
+        this.dispatchAction('close-pane', 'key');
         return;
       }
+      // Cmd+G / Cmd+Shift+G belong to the find bar and are answered above while
+      // one is open. With none open there is nothing to step through, so they
+      // fall through to the shell rather than opening a bar the user did not
+      // ask for.
 
       switch (e.key.toLowerCase()) {
         case 'k': e.preventDefault(); this.handleAskAI(); return;
-        case 'i': e.preventDefault(); this.statusModal.show(); return;
-        case 'p': e.preventDefault(); this.palette.show(); return;
-        case 't': e.preventDefault(); this.createTab(); return;
-        case 'w': e.preventDefault(); this.confirmCloseTab(this.activeTabIndex); return;
-        case '|': e.preventDefault(); this.splitPane('vertical'); return;
-        case '-': e.preventDefault(); this.splitPane('horizontal'); return;
-        case 'l': e.preventDefault(); this.clearActiveTerminal(); return;
+        case 'i': e.preventDefault(); this.dispatchAction('status', 'key'); return;
+        case 'p': e.preventDefault(); this.dispatchAction('palette', 'key'); return;
+        case 't': e.preventDefault(); this.dispatchAction('new-tab', 'key'); return;
+        case 'w': e.preventDefault(); this.dispatchAction('close-tab', 'key'); return;
+        case 'f': e.preventDefault(); this.dispatchAction('find', 'key'); return;
+        // Cmd+D splits vertically, Cmd+Shift+D horizontally — iTerm2's and
+        // Ghostty's arrangement. Cmd+| is kept as an alias because it looks
+        // like what it does; Cmd+- is now Zoom Out, which is what freed it.
+        case 'd': case '|': e.preventDefault(); this.dispatchAction('split-vertical', 'key'); return;
+        case '=': case '+': e.preventDefault(); this.dispatchAction('zoom-in', 'key'); return;
+        case '-': e.preventDefault(); this.dispatchAction('zoom-out', 'key'); return;
+        case '0': e.preventDefault(); this.dispatchAction('zoom-reset', 'key'); return;
+        case 'l': e.preventDefault(); this.dispatchAction('clear', 'key'); return;
         case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9':
           e.preventDefault();
           const tabIdx = parseInt(e.key) - 1;

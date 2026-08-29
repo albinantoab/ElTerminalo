@@ -114,7 +114,18 @@ func (m *Manager) SetContext(ctx context.Context) {
 
 // CreateSession spawns a new PTY and starts streaming output.
 func (m *Manager) CreateSession(cols, rows int, cwd string) (string, error) {
-	session, err := NewSession(m.shell, m.configDir, cols, rows, cwd)
+	return m.CreateSessionWithShell(m.shell, cols, rows, cwd)
+}
+
+// CreateSessionWithShell is CreateSession with an explicit shell. The settings
+// file can name a shell, and a change there should reach the next pane rather
+// than wait for a relaunch, so the app resolves it per session and passes it
+// in; the Manager's own shell stays the default for callers that don't care.
+func (m *Manager) CreateSessionWithShell(shell string, cols, rows int, cwd string) (string, error) {
+	if shell == "" {
+		shell = m.shell
+	}
+	session, err := NewSession(shell, m.configDir, cols, rows, cwd)
 	if err != nil {
 		return "", err
 	}

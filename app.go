@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -12,13 +13,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/albinanto/elterminalo/internal/commands"
 	"github.com/albinanto/elterminalo/internal/config"
 	"github.com/albinanto/elterminalo/internal/history"
 	"github.com/albinanto/elterminalo/internal/llm"
 	"github.com/albinanto/elterminalo/internal/logging"
+	"github.com/albinanto/elterminalo/internal/macos"
 	"github.com/albinanto/elterminalo/internal/ptymanager"
+	"github.com/albinanto/elterminalo/internal/settings"
 	"github.com/albinanto/elterminalo/internal/shellintegration"
 	"github.com/albinanto/elterminalo/internal/stats"
 	"github.com/albinanto/elterminalo/internal/theme"
@@ -57,6 +62,28 @@ const (
 	quitButtonLabel   = "Quit"
 	cancelButtonLabel = "Cancel"
 )
+
+// menuActionEvent carries a native menu item's action name to the frontend as
+// {"action": "<name>"}. The names are listed next to the menu in main.go and
+// the frontend switches on them; they are a contract, not a label.
+const menuActionEvent = "menu:action"
+
+// themesChangedEvent tells the frontend a theme was added or replaced, as
+// {"name": "<theme name>"}. It refetches the list and switches to that theme.
+const themesChangedEvent = "themes:changed"
+
+// issuesURL is where Help › Report an Issue goes.
+const issuesURL = "https://github.com/albinantoab/ElTerminalo/issues"
+
+// maxWindowTitleBytes bounds the title a pane may set. The value comes from the
+// terminal — an OSC 0/2 sequence any program can emit — so it is neither short
+// nor trusted; 256 bytes is far more than a title bar can show.
+const maxWindowTitleBytes = 256
+
+// maxSchemeBytes bounds an imported colour scheme. The largest .itermcolors in
+// circulation is a few tens of kilobytes; this is only here so that picking a
+// disk image in the file dialog cannot read it all into memory.
+const maxSchemeBytes = 4 << 20
 
 type App struct {
 	ctx    context.Context
@@ -130,6 +157,16 @@ func (a *App) startup(ctx context.Context) {
 	llm.CleanStaleFiles(a.cfg.Dir())
 
 	a.registerFileDrop(ctx)
+
+	// One line for what the user's config.json actually resolved to, and one
+	// per key we had to repair. Without it, "my font size does nothing" is
+	// unanswerable: the file is on their disk, not ours, and a clamped or
+	// misspelled value looks exactly like a setting that is not wired up.
+	set, warnings := settings.Load(a.cfg.Dir())
+	log.Printf("startup: settings %s", describeSettings(set))
+	for _, w := range warnings {
+		log.Printf("startup: settings: %s", w)
+	}
 
 	// Restore saved window geometry
 	if g := a.cfg.LoadWindowGeometry(); g != nil {
@@ -235,8 +272,7 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 		}
 	}()
 
-	// Only interrupt the user when quitting would actually kill something.
-	if running := a.ptyMgr.RunningCommandCount(); running > 0 && !a.confirmQuitWithUser(ctx, running) {
+	if !a.shouldQuit(ctx) {
 		return true // the user stayed; the deferred clear re-arms the next Cmd-Q
 	}
 
@@ -282,16 +318,49 @@ func (a *App) beginQuit(ctx context.Context) bool {
 	return true
 }
 
-// confirmQuitWithUser shows the native "commands still running" alert and
-// reports whether the user chose to quit. A dialog that fails to display is
-// treated as a Quit: an unquittable app is far worse than a lost confirmation.
+// shouldQuit applies the user's "confirmQuit" setting and reports whether the
+// quit may go ahead.
+//
+// The setting is read here, at the moment of the quit, rather than at startup:
+// someone who has just edited config.json expects the next Cmd-Q to honour it,
+// and a settings file is a few hundred bytes read once per quit attempt.
+func (a *App) shouldQuit(ctx context.Context) bool {
+	// Warnings are not logged from here. GetSettings already reports them
+	// whenever the frontend asks, and a quit is the worst moment to add lines
+	// to a log somebody is about to go looking through.
+	set, _ := settings.Load(a.cfg.Dir())
+	running := a.ptyMgr.RunningCommandCount()
+
+	switch set.ConfirmQuit {
+	case settings.ConfirmQuitNever:
+		log.Printf("quit: confirmQuit is %q; quitting with %d command(s) running", set.ConfirmQuit, running)
+		return true
+	case settings.ConfirmQuitAlways:
+		return a.confirmQuitWithUser(ctx, running)
+	default:
+		// "running": only interrupt when quitting would actually kill something.
+		return running == 0 || a.confirmQuitWithUser(ctx, running)
+	}
+}
+
+// confirmQuitWithUser shows the native quit confirmation and reports whether
+// the user chose to quit. A dialog that fails to display is treated as a Quit:
+// an unquittable app is far worse than a lost confirmation.
+//
+// running may be zero — that is the "always" policy, where there is nothing to
+// warn about and the question is the whole message.
 func (a *App) confirmQuitWithUser(ctx context.Context, running int) bool {
 	message := fmt.Sprintf("%d commands are still running and will be terminated.", running)
-	if running == 1 {
+	switch running {
+	case 0:
+		// Reached only under confirmQuit "always": nothing is at stake, so the
+		// question is the whole message.
+		message = "Quit El Terminalo?"
+	case 1:
 		message = "1 command is still running and will be terminated."
 	}
 
-	log.Printf("quit: %d command(s) still running; showing the confirmation dialog", running)
+	log.Printf("quit: showing the confirmation dialog (%d command(s) running)", running)
 	choice, err := wailsRuntime.MessageDialog(ctx, wailsRuntime.MessageDialogOptions{
 		Type:    wailsRuntime.QuestionDialog,
 		Title:   "Quit El Terminalo?",
@@ -389,6 +458,12 @@ func (a *App) shutdown(ctx context.Context) {
 
 // CreateSession creates a new PTY session and returns its ID.
 // Cols and rows are clamped to defaults if <= 0.
+//
+// The shell is resolved here, per session, from the settings file, so a change
+// to "shell" reaches the next pane (after Reload Settings) instead of waiting
+// for a relaunch. The default resolved at startup remains the fallback for an
+// empty or unusable value; settings.ResolveShell validates against the
+// filesystem and says why it fell back.
 func (a *App) CreateSession(cols, rows int, cwd string) (string, error) {
 	if cols <= 0 {
 		cols = 80
@@ -396,12 +471,17 @@ func (a *App) CreateSession(cols, rows int, cwd string) (string, error) {
 	if rows <= 0 {
 		rows = 24
 	}
-	id, err := a.ptyMgr.CreateSession(cols, rows, cwd)
+	set, _ := settings.Load(a.cfg.Dir())
+	shell, warning := settings.ResolveShell(set.Shell, a.shell)
+	if warning != "" {
+		log.Printf("session: %s", warning)
+	}
+	id, err := a.ptyMgr.CreateSessionWithShell(shell, cols, rows, cwd)
 	if err != nil {
-		log.Printf("session: create failed (cols=%d rows=%d cwd=%q): %v", cols, rows, cwd, err)
+		log.Printf("session: create failed (shell=%q cols=%d rows=%d cwd=%q): %v", shell, cols, rows, cwd, err)
 		return "", err
 	}
-	log.Printf("session: created %q (cols=%d rows=%d cwd=%q)", id, cols, rows, cwd)
+	log.Printf("session: created %q (shell=%q cols=%d rows=%d cwd=%q)", id, shell, cols, rows, cwd)
 	return id, nil
 }
 
@@ -518,6 +598,366 @@ func startAndReap(cmd *exec.Cmd) error {
 	return nil
 }
 
+// GetSettings returns the user's preferences from config.json, with every
+// missing or unusable key filled from the defaults. It never fails.
+//
+// The file is read on every call rather than cached. It is a few hundred bytes,
+// the frontend asks for it when a pane is built or the user reloads settings,
+// and caching would turn "Reload Settings" into a command that reloads whatever
+// we happened to parse at launch.
+func (a *App) GetSettings() settings.Settings {
+	set, warnings := settings.Load(a.cfg.Dir())
+	for _, w := range warnings {
+		log.Printf("settings: %s", w)
+	}
+	return set
+}
+
+// OpenSettingsFile opens config.json in whatever the user has associated with
+// .json, writing it with the defaults first if it is not there yet.
+//
+// It never overwrites an existing file — including one that does not parse.
+// That is the case this guard is for: a stray comma makes Load fall back to the
+// defaults, and if opening the file then rewrote it, the fix the user came here
+// to make would be gone before they saw it.
+func (a *App) OpenSettingsFile() {
+	path := settings.Path(a.cfg.Dir())
+
+	switch _, err := os.Stat(path); {
+	case err == nil:
+		// Already there — the user's text, left exactly as it is.
+	case os.IsNotExist(err):
+		if err := settings.Save(a.cfg.Dir(), settings.Defaults()); err != nil {
+			log.Printf("settings: could not create %q: %v", path, err)
+			return
+		}
+		log.Printf("settings: created %q with the defaults", path)
+	default:
+		// Present but not stat-able. Opening it may still work, and `open` will
+		// say so far more usefully than we can.
+		log.Printf("settings: %q cannot be inspected (%v); opening it anyway", path, err)
+	}
+
+	if err := startAndReap(exec.Command(updater.OpenPath, path)); err != nil {
+		log.Printf("settings: could not open %q: %v", path, err)
+	}
+}
+
+// SetWindowTitle sets the native window title.
+//
+// The string comes from a pane, which got it from the terminal, which got it
+// from whatever the shell printed — an OSC 0/2 sequence is something any
+// program the user runs can emit. So it is sanitised on the way in: control
+// characters and the invisible format class go, and the length is capped. An
+// empty result restores the app's own name rather than leaving a blank title
+// bar.
+func (a *App) SetWindowTitle(title string) {
+	if a.ctx == nil {
+		return
+	}
+	wailsRuntime.WindowSetTitle(a.ctx, sanitizeWindowTitle(title))
+}
+
+// What a flood of BEL bytes is allowed to cost.
+//
+// Bell is a binding, and the byte behind each call is one that a program the
+// user ran printed: `cat` of a binary emits thousands in a second, and every
+// one of them used to become two dispatch_async blocks on the main queue — the
+// queue that also draws the window. The frontend coalesces too, but per pane,
+// which is the wrong unit twice over: a pane cannot see what the other panes
+// are doing, and its allowance multiplies by however many are open.
+//
+// bellBurst then bellRatePerSec: five beeps back to back, then five a second.
+// The system alert sound is roughly that long, so a higher rate is not audible
+// as separate bells anyway — it is only main-queue work.
+//
+// bellAttentionGap bounds the Dock bounce separately and much harder. It leaves
+// the tile marked and is the more expensive of the two calls, and one bounce a
+// second already says everything a bounce can say.
+const (
+	bellBurst        = 5
+	bellRatePerSec   = 5
+	bellAttentionGap = time.Second
+	// bellDropSummaryGap is the shortest interval between two "dropped" lines.
+	// Logging every dropped bell would turn a bell flood into a log flood.
+	bellDropSummaryGap = time.Minute
+)
+
+var (
+	// bellClock is the clock the limiter reads. A variable so tests can step
+	// time instead of sleeping through a refill window — the same seam
+	// logging.frontendClock uses.
+	bellClock = time.Now
+
+	// bells is process-wide on purpose: the point of this layer is to bound the
+	// beeps from *all* panes together.
+	bells = newBellLimiter(bellBurst, bellRatePerSec, bellAttentionGap)
+)
+
+// bellLimiter is the backend half of the bell rate limit: a token bucket for
+// the sound, and a separate minimum gap for the Dock bounce.
+type bellLimiter struct {
+	mu     sync.Mutex
+	burst  float64
+	refill float64
+	gap    time.Duration
+
+	tokens float64
+	// last is when tokens was last brought up to date. Zero until the first
+	// take, so the bucket starts full rather than crediting the refill for every
+	// second since the zero time.
+	last time.Time
+	// attentionAt is the earliest the next Dock bounce may happen.
+	attentionAt time.Time
+	// dropped counts the bells refused since the last summary line, and
+	// summaryAt is the earliest the next one may be written.
+	dropped   int
+	summaryAt time.Time
+}
+
+func newBellLimiter(burst, refillPerSecond float64, gap time.Duration) *bellLimiter {
+	return &bellLimiter{burst: burst, refill: refillPerSecond, gap: gap, tokens: burst}
+}
+
+// take decides what one bell may do: nothing, ring, or ring and bounce the Dock
+// icon.
+//
+// attention is never true without beep. A bell suppressed as noise must not
+// still be able to mark the Dock tile — the tile is the part that outlives the
+// event, so it is the part a flood must not be able to drive.
+//
+// dropped is non-zero at most once per bellDropSummaryGap and carries how many
+// bells have been refused since the previous summary; the caller logs it as one
+// line. As in logging's bucket, a pending count is flushed on the first call at
+// or after the window closes whether or not that call was itself dropped, so a
+// flood that stops still gets its final count into the log.
+func (b *bellLimiter) take(now time.Time) (beep, attention bool, dropped int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.last.IsZero() {
+		if elapsed := now.Sub(b.last); elapsed > 0 {
+			b.tokens += elapsed.Seconds() * b.refill
+			if b.tokens > b.burst {
+				b.tokens = b.burst
+			}
+		}
+	}
+	b.last = now
+
+	beep = b.tokens >= 1
+	if beep {
+		b.tokens--
+		if !now.Before(b.attentionAt) {
+			attention = true
+			b.attentionAt = now.Add(b.gap)
+		}
+	} else {
+		b.dropped++
+	}
+
+	if b.dropped > 0 && !now.Before(b.summaryAt) {
+		dropped = b.dropped
+		b.dropped = 0
+		b.summaryAt = now.Add(bellDropSummaryGap)
+	}
+	return beep, attention, dropped
+}
+
+// Bell rings the system alert sound and, when El Terminalo is in the
+// background, bounces its Dock icon once.
+//
+// The frontend calls this only when the user's "bell" setting includes sound;
+// the visual flash is a pane-level effect it does itself, because only it knows
+// which pane rang.
+//
+// Rate limited across the whole process — see bellLimiter. The frontend's own
+// coalescing is per pane and cannot bound the total, and a bell that is not
+// rung is not worth an alert of its own, so a dropped one is only ever reported
+// as a periodic count.
+func (a *App) Bell() {
+	beep, attention, dropped := bells.take(bellClock())
+	if dropped > 0 {
+		log.Printf("bell: dropped %d bell(s) (rate limited)", dropped)
+	}
+	if !beep {
+		return
+	}
+	macos.Beep()
+	if attention {
+		macos.RequestAttention()
+	}
+}
+
+// ImportColorScheme asks the user for an iTerm2 .itermcolors or a Ghostty theme
+// file, converts it to a theme, saves it, and returns the theme's name.
+//
+// ("", nil) means the user cancelled the dialog, which is not a failure and
+// must not be reported as one. An error is written to be shown: it names the
+// format we tried to read and what was wrong with it.
+//
+// themesChangedEvent is emitted from here rather than from the menu callback so
+// that there is one import path, whether the user came through File › Import
+// Color Scheme… (which sends the menu action, and the frontend calls this) or
+// through the palette (which calls this directly).
+//
+// The event is emitted last, after theme.Upsert has the theme durably on disk,
+// and only on success: it is the frontend's sole cue to refetch, so an event
+// sent before the write would have it read the file it is being told about
+// before that file exists, and one sent after a failed write would have it
+// switch to a theme that is not there.
+func (a *App) ImportColorScheme() (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("the window is not ready yet")
+	}
+
+	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Import Color Scheme",
+		Filters: []wailsRuntime.FileFilter{
+			// Ghostty themes have no extension at all, which is why the second
+			// filter is not a courtesy: without it they cannot be picked.
+			{DisplayName: "iTerm2 Color Schemes (*.itermcolors)", Pattern: "*.itermcolors"},
+			{DisplayName: "All Files", Pattern: "*"},
+		},
+	})
+	if err != nil {
+		log.Printf("theme import: the file dialog failed: %v", err)
+		return "", err
+	}
+	if path == "" {
+		log.Printf("theme import: cancelled")
+		return "", nil
+	}
+
+	data, err := readBounded(path, maxSchemeBytes)
+	if err != nil {
+		log.Printf("theme import: %q could not be read: %v", path, err)
+		return "", fmt.Errorf("could not read %s: %w", filepath.Base(path), err)
+	}
+
+	name := theme.SchemeName(path)
+	imported, err := theme.ParseScheme(name, data)
+	if err != nil {
+		log.Printf("theme import: %q did not parse: %v", path, err)
+		return "", fmt.Errorf("%s could not be read as a colour scheme — %w", filepath.Base(path), err)
+	}
+
+	if err := theme.Upsert(a.cfg.Dir(), imported); err != nil {
+		log.Printf("theme import: %q parsed but could not be saved: %v", path, err)
+		return "", fmt.Errorf("could not save the theme: %w", err)
+	}
+
+	log.Printf("theme import: saved %q from %q", imported.Name, path)
+	wailsRuntime.EventsEmit(a.ctx, themesChangedEvent, map[string]string{"name": imported.Name})
+	return imported.Name, nil
+}
+
+// readBounded reads at most limit bytes from path, and reports an error rather
+// than a truncated file when there is more. A truncated colour scheme would
+// parse into a half-applied theme, which is worse than not importing one.
+func readBounded(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	// limit+1 so a file of exactly limit bytes still reads whole and only a
+	// larger one trips the check.
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("the file is larger than %d bytes", limit)
+	}
+	return data, nil
+}
+
+// emitMenuAction forwards a native menu item to the frontend.
+//
+// Called from an AppKit menu callback, which can only happen once the window is
+// up — but a nil context here would panic inside Wails and take the app down
+// with it, so it is checked rather than assumed.
+func (a *App) emitMenuAction(action string) {
+	if a.ctx == nil {
+		log.Printf("menu: %q ignored, there is no window yet", action)
+		return
+	}
+	wailsRuntime.EventsEmit(a.ctx, menuActionEvent, map[string]string{"action": action})
+}
+
+// toggleFullScreen flips the window between full screen and not.
+//
+// Done in Go rather than through the Window menu's own "Full Screen" item
+// because that one is a role Wails builds with enterFullScreenMode:, which acts
+// on the *view*; this asks the window, which is what the user means.
+func (a *App) toggleFullScreen() {
+	if a.ctx == nil {
+		return
+	}
+	if wailsRuntime.WindowIsFullscreen(a.ctx) {
+		wailsRuntime.WindowUnfullscreen(a.ctx)
+		return
+	}
+	wailsRuntime.WindowFullscreen(a.ctx)
+}
+
+// openIssues sends Help › Report an Issue to the default browser.
+func (a *App) openIssues() {
+	if a.ctx == nil {
+		return
+	}
+	wailsRuntime.BrowserOpenURL(a.ctx, issuesURL)
+}
+
+// sanitizeWindowTitle makes an arbitrary terminal-supplied string safe to put
+// in the title bar: one line, bounded, and free of the characters that reorder
+// or hide what is around them.
+//
+// The classes dropped are the same ones logging.sanitize drops, and for the
+// same reason: U+202E and its neighbours reverse the rendering of everything
+// after them, so a program that sets its own title could otherwise make the
+// window claim to be something it is not.
+func sanitizeWindowTitle(title string) string {
+	var b strings.Builder
+	b.Grow(len(title))
+	for _, r := range title {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+
+	out := strings.TrimSpace(b.String())
+	if len(out) > maxWindowTitleBytes {
+		cut := maxWindowTitleBytes
+		// Never split a rune: the tail would render as a replacement character.
+		for cut > 0 && !utf8.RuneStart(out[cut]) {
+			cut--
+		}
+		out = strings.TrimSpace(out[:cut])
+	}
+	if out == "" {
+		return appTitle
+	}
+	return out
+}
+
+// describeSettings renders the loaded settings as one log line. Only the values
+// are interesting — the keys are documented in the README and in the file
+// itself — so this stays short enough to read at a glance in a bug report.
+func describeSettings(s settings.Settings) string {
+	shell := s.Shell
+	if shell == "" {
+		shell = "(default)"
+	}
+	return fmt.Sprintf(
+		"font=%q size=%v lineHeight=%v cursor=%s blink=%t scrollback=%d shell=%s optionIsMeta=%t bell=%s copyOnSelect=%t confirmQuit=%s",
+		s.FontFamily, s.FontSize, s.LineHeight, s.CursorStyle, s.CursorBlink,
+		s.Scrollback, shell, s.OptionIsMeta, s.Bell, s.CopyOnSelect, s.ConfirmQuit)
+}
+
 // GetThemes returns the available themes (built-in merged with user themes).
 func (a *App) GetThemes() []theme.Theme {
 	return theme.Merged(a.cfg.Dir())
@@ -541,28 +981,22 @@ func (a *App) SaveTheme(name, background, foreground, accent, accentDim, border,
 		BrightCyan: brightCyan, BrightWhite: brightWhite,
 	}
 
-	existing, _ := theme.LoadUserThemes(a.cfg.Dir())
-
-	// Replace if same name exists, otherwise append
-	found := false
-	for i, t := range existing {
-		if strings.EqualFold(t.Name, name) {
-			existing[i] = newTheme
-			found = true
-			break
-		}
+	if err := theme.Upsert(a.cfg.Dir(), newTheme); err != nil {
+		// Logged here because the theme wizard only reports this to the
+		// webview's console, which goes nowhere a user can retrieve — and the
+		// failure this now produces, a themes.json that stopped parsing, is
+		// exactly what someone would come to the log to understand.
+		log.Printf("theme: %q could not be saved: %v", name, err)
+		return err
 	}
-	if !found {
-		existing = append(existing, newTheme)
-	}
-
-	return theme.SaveUserThemes(a.cfg.Dir(), existing)
+	return nil
 }
 
 // DeleteTheme removes a custom theme by name.
 func (a *App) DeleteTheme(name string) error {
 	existing, err := theme.LoadUserThemes(a.cfg.Dir())
 	if err != nil {
+		log.Printf("theme: %q could not be deleted: %v", name, err)
 		return err
 	}
 	filtered := make([]theme.Theme, 0, len(existing))
