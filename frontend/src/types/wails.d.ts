@@ -21,6 +21,7 @@ export interface WailsApp {
   ConfirmQuit(): Promise<void>;
   GetAllSessionStatuses(): Promise<Record<string, SessionStatusDTO>>;
   GetVersion(): Promise<string>;
+  GetHostname(): Promise<string>;
   CheckForUpdate(): Promise<UpdateInfo>;
   ApplyUpdate(): Promise<void>;
   AskAI(prompt: string, cwd: string): Promise<string>;

@@ -1,4 +1,4 @@
-import { Terminal } from '@xterm/xterm';
+import { Terminal, IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
@@ -37,6 +37,42 @@ export interface TerminalContextActions {
   closePane: () => void;
 }
 
+// Hostname of this machine, used to reject OSC 7 reports that originate from
+// a remote shell (an SSH session whose far end also has shell integration).
+// Set once at startup; until then only host-less reports are accepted.
+let localHostname = '';
+
+export function setLocalHostname(name: string): void {
+  localHostname = name.trim().toLowerCase();
+}
+
+function isLocalHost(host: string): boolean {
+  const h = host.toLowerCase();
+  if (h === '' || h === 'localhost' || h === '127.0.0.1') return true;
+  if (!localHostname) return false;
+  if (h === localHostname) return true;
+  // "albins-mac-mini" vs "albins-mac-mini.local": compare the first label.
+  return h.split('.')[0] === localHostname.split('.')[0];
+}
+
+// Parses an OSC 7 payload ("file://<host>/<path>") into an absolute path, or
+// returns '' when the report is for a different machine. The payload arrives
+// already decoded from UTF-8, so only percent-escapes need undoing; the
+// emitter escapes '%' and nothing else.
+function parseOsc7Path(data: string): string {
+  if (!data.startsWith('file://')) return '';
+  const rest = data.slice('file://'.length);
+  const slash = rest.indexOf('/');
+  if (slash < 0) return '';
+  if (!isLocalHost(rest.slice(0, slash))) return '';
+  const raw = rest.slice(slash);
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 export class TerminalPane {
   public sessionId: string = '';
   public terminal: Terminal;
@@ -51,6 +87,12 @@ export class TerminalPane {
   private ctxActions: TerminalContextActions | null = null;
   public shellIntegration: ShellIntegration;
   public smartRender: SmartRenderManager;
+  // Last directory the shell reported (OSC 7), or the one this pane was opened
+  // with. Never cleared once set: a momentary failure to read the cwd must not
+  // be allowed to erase the pane's folder from the saved layout.
+  private lastKnownCwd: string = '';
+  private cwdReportedByShell = false;
+  private cwdOscHandler: IDisposable | null = null;
 
   constructor(container: HTMLElement, theme: XtermTheme) {
     this.container = container;
@@ -73,6 +115,18 @@ export class TerminalPane {
 
     // Register OSC 133 handler for shell integration (command blocks)
     this.shellIntegration = new ShellIntegration(this.terminal);
+
+    // OSC 7: the shell tells us its working directory on every prompt and on
+    // every cd. This is authoritative and free — no process spawn, nothing that
+    // can be denied or time out — so it is preferred over asking the backend.
+    this.cwdOscHandler = this.terminal.parser.registerOscHandler(7, (data: string) => {
+      const cwd = parseOsc7Path(data);
+      if (cwd) {
+        this.lastKnownCwd = cwd;
+        this.cwdReportedByShell = true;
+      }
+      return true;
+    });
     this.smartRender = new SmartRenderManager(this.terminal, container, this.shellIntegration);
 
     // Block Ctrl+L from reaching the shell — only Cmd+L should clear
@@ -120,6 +174,10 @@ export class TerminalPane {
   async connect(cwd: string = ''): Promise<void> {
     const cols = this.terminal.cols;
     const rows = this.terminal.rows;
+
+    // Seed the cache with the directory this pane is being opened in, so the
+    // layout can still be saved correctly before the first prompt has rendered.
+    if (cwd) this.lastKnownCwd = cwd;
 
     // Create PTY session via Go backend
     this.sessionId = await window.go.main.App.CreateSession(cols, rows, cwd);
@@ -186,8 +244,21 @@ export class TerminalPane {
   }
 
   async getCWD(): Promise<string> {
-    if (!this.sessionId) return '';
-    return await window.go.main.App.GetSessionCWD(this.sessionId);
+    // The shell's own OSC 7 report is authoritative and costs nothing. Only a
+    // shell without integration (fish, a custom rc that resets hooks) needs the
+    // backend probe, which forks lsof and can fail transiently. Either way,
+    // never return a worse answer than the last directory we actually knew.
+    if (this.cwdReportedByShell || !this.sessionId) return this.lastKnownCwd;
+    try {
+      const cwd = await window.go.main.App.GetSessionCWD(this.sessionId);
+      if (cwd) {
+        this.lastKnownCwd = cwd;
+        return cwd;
+      }
+    } catch {
+      /* fall through to the cached value */
+    }
+    return this.lastKnownCwd;
   }
 
   private initContextMenu(container: HTMLElement): void {
@@ -405,6 +476,10 @@ export class TerminalPane {
   dispose(): void {
     this.smartRender.dispose();
     this.shellIntegration.dispose();
+    if (this.cwdOscHandler) {
+      this.cwdOscHandler.dispose();
+      this.cwdOscHandler = null;
+    }
     if (this.sessionId) {
       window.go.main.App.CloseSession(this.sessionId);
     }

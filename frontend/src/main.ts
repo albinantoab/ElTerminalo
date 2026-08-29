@@ -1,4 +1,4 @@
-import { TerminalPane } from './terminal/TerminalPane';
+import { TerminalPane, setLocalHostname } from './terminal/TerminalPane';
 import { AppTheme, themeFromDTO, applyThemeToCSS } from './theme/themes';
 import { PaneInfo, SplitNode, Tab, SavedSplitNode, SavedState, CustomCommand, PaletteCommand } from './types';
 import { CommandPalette } from './palette/CommandPalette';
@@ -169,6 +169,9 @@ class ElTerminalo {
       getActiveTabIndex: () => this.activeTabIndex,
       getCurrentThemeName: () => this.currentTheme.name,
     });
+
+    // Needed before any pane connects: OSC 7 reports are filtered by host.
+    try { setLocalHostname(await window.go.main.App.GetHostname()); } catch { /* host-less reports still work */ }
 
     const themeDTOs = await window.go.main.App.GetThemes();
     this.themes = themeDTOs.map(themeFromDTO);

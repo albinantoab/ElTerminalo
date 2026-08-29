@@ -278,6 +278,17 @@ func (a *App) GetVersion() string {
 	return Version
 }
 
+// GetHostname returns this machine's hostname. The frontend uses it to accept
+// OSC 7 directory reports only from local shells, so an SSH session's remote
+// path is never written into the saved layout.
+func (a *App) GetHostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+}
+
 // GetSystemStats returns the latest CPU% and resident memory for this process.
 // CPU% is computed against the previous call, so the first call returns 0%.
 func (a *App) GetSystemStats() stats.Snapshot {

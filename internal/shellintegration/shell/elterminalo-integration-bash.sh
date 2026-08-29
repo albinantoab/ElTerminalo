@@ -1,5 +1,6 @@
 # ElTerminalo Shell Integration for Bash
-# Emits OSC 133 sequences to bracket commands for the terminal to parse.
+# Emits OSC 133 sequences to bracket commands for the terminal to parse,
+# and OSC 7 to report the working directory.
 # Only activates inside ElTerminalo (detected via $TERM_PROGRAM).
 
 [[ "$TERM_PROGRAM" == "ElTerminalo" ]] || return 0
@@ -13,6 +14,14 @@ __elterminalo_osc133() {
   builtin printf '\033]133;%s\007' "$1"
 }
 
+__elterminalo_host=${HOSTNAME:-localhost}
+
+# Report the working directory to the terminal (OSC 7) — see the zsh script for
+# why this exists: it replaces probing the shell's cwd from outside the process.
+__elterminalo_osc7() {
+  builtin printf '\033]7;file://%s%s\007' "$__elterminalo_host" "${PWD//%/%25}"
+}
+
 __elterminalo_prompt_command() {
   local exit_code=$?
   __elterminalo_in_prompt=1
@@ -23,6 +32,7 @@ __elterminalo_prompt_command() {
   fi
 
   __elterminalo_osc133 "A"
+  __elterminalo_osc7
 
   # Call the original PROMPT_COMMAND if any
   if [[ -n "$__elterminalo_orig_prompt_command" ]]; then

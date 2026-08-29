@@ -216,7 +216,11 @@ func (m *Manager) GetAllSessionCWDs() map[string]string {
 
 	result := make(map[string]string)
 	for i, s := range sessions {
-		if cwd, err := s.CWD(); err == nil {
+		// Report only what we could actually read. Sessions whose cwd could not
+		// be determined are omitted rather than mapped to "", so callers can tell
+		// "unknown" apart from "at the filesystem root" and keep their own last
+		// known value instead of overwriting it.
+		if cwd, err := s.CWD(); err == nil && cwd != "" {
 			result[ids[i]] = cwd
 		}
 	}

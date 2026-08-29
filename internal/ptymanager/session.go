@@ -35,14 +35,8 @@ func NewSession(shell, configDir string, cols, rows int, cwd string) (*Session, 
 		rows = defaultRows
 	}
 
-	dir := cwd
-	if dir == "" {
-		dir, _ = os.UserHomeDir()
-	}
-	// Verify directory exists, fallback to home
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		dir, _ = os.UserHomeDir()
-	}
+	home, _ := os.UserHomeDir()
+	dir := resolveStartDir(cwd, home)
 
 	cmd := exec.Command(shell, "-l")
 	cmd.Dir = dir
@@ -77,10 +71,20 @@ func NewSession(shell, configDir string, cols, rows int, cwd string) (*Session, 
 
 	cmd.Env = env
 
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Cols: uint16(cols),
-		Rows: uint16(rows),
-	})
+	ws := &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}
+
+	ptmx, err := pty.StartWithSize(cmd, ws)
+	if err != nil && dir != home && home != "" {
+		// The shell could not chdir into the restored directory (unmounted
+		// volume, revoked access). Open the pane in home rather than failing —
+		// but note that the caller keeps the original path in the layout, so the
+		// pane returns to it once the directory is reachable again.
+		retry := exec.Command(shell, "-l")
+		retry.Dir = home
+		retry.Env = env
+		cmd = retry
+		ptmx, err = pty.StartWithSize(cmd, ws)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to start pty: %w", err)
 	}
@@ -119,4 +123,32 @@ func (s *Session) Close() {
 			s.cmd.Process.Wait()
 		}
 	})
+}
+
+// resolveStartDir decides which directory a new shell should start in.
+//
+// It falls back to home only when the requested directory is provably gone.
+// The Stat below runs in the app process against a path that is normally under
+// a TCC-protected root (~/Documents, ~/Desktop, ~/Downloads), and a privacy
+// denial returns EPERM, not ENOENT: the folder is fine, this process just could
+// not stat it at that instant. Collapsing both cases into "fall back to home"
+// reopened every pane in $HOME, and the 30s layout autosave then wrote $HOME
+// back into state.json — turning a momentary denial into permanent loss of the
+// user's folders. Anything other than "does not exist" keeps the directory.
+func resolveStartDir(cwd, home string) string {
+	dir := cwd
+	if dir == "" {
+		return home
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return home
+		}
+		return dir
+	}
+	if !info.IsDir() {
+		return home
+	}
+	return dir
 }

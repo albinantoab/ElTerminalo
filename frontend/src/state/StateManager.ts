@@ -52,7 +52,11 @@ export class StateManager {
   async serializeLayout(node: SplitNode): Promise<SavedSplitNode> {
     if (node.type === 'leaf' && node.paneInfo) {
       const cwd = await node.paneInfo.pane.getCWD();
-      return { type: 'leaf', cwd };
+      // Omit the key rather than persisting an empty string. This autosave runs
+      // every 30s, so writing "" here would durably replace a real folder with
+      // $HOME on the next launch — a momentary read failure must never be able
+      // to destroy the layout.
+      return cwd ? { type: 'leaf', cwd } : { type: 'leaf' };
     }
     if (node.type === 'split' && node.children) {
       const [a, b] = await Promise.all([

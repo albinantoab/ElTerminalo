@@ -1,5 +1,6 @@
 # ElTerminalo Shell Integration for Zsh
-# Emits OSC 133 sequences to bracket commands for the terminal to parse.
+# Emits OSC 133 sequences to bracket commands for the terminal to parse,
+# and OSC 7 to report the working directory.
 # Only activates inside ElTerminalo (detected via $TERM_PROGRAM).
 
 [[ "$TERM_PROGRAM" == "ElTerminalo" ]] || return 0
@@ -12,6 +13,18 @@ __elterminalo_osc133() {
   builtin printf '\033]133;%s\007' "$1"
 }
 
+__elterminalo_host=${HOST:-${HOSTNAME:-localhost}}
+
+# Report the working directory to the terminal (OSC 7) — the same mechanism
+# iTerm2, WezTerm and kitty use. The shell is the only process that knows its
+# own cwd for certain, so telling the terminal directly removes any need to
+# probe it from outside (lsof), which can fail transiently and used to cost the
+# user their saved folder. Only '%' is escaped: the payload reaches the parser
+# as an already-decoded string, so spaces and UTF-8 pass through untouched.
+__elterminalo_osc7() {
+  builtin printf '\033]7;file://%s%s\007' "$__elterminalo_host" "${PWD//\%/%25}"
+}
+
 __elterminalo_precmd() {
   local exit_code=$?
 
@@ -21,6 +34,7 @@ __elterminalo_precmd() {
   fi
 
   __elterminalo_osc133 "A"
+  __elterminalo_osc7
 }
 
 __elterminalo_preexec() {
@@ -42,6 +56,7 @@ __elterminalo_bootstrap() {
   # Register the real hooks at the END of the arrays
   precmd_functions+=(__elterminalo_precmd)
   preexec_functions+=(__elterminalo_preexec)
+  chpwd_functions+=(__elterminalo_osc7)
 
   # Load built-in prompt AFTER .zshrc has finished
   # (skips if starship/p10k/oh-my-zsh is active)
