@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/albinanto/elterminalo/internal/config"
 	"github.com/albinanto/elterminalo/internal/history"
 	"github.com/albinanto/elterminalo/internal/llm"
+	"github.com/albinanto/elterminalo/internal/logging"
 	"github.com/albinanto/elterminalo/internal/ptymanager"
 	"github.com/albinanto/elterminalo/internal/shellintegration"
 	"github.com/albinanto/elterminalo/internal/stats"
@@ -41,6 +43,13 @@ const saveAndQuitTimeout = 2 * time.Second
 // ConfirmQuit. The frontend contract depends on this exact name.
 const saveAndQuitEvent = "app:save-and-quit"
 
+// filesDroppedEvent carries a native file drop to the frontend as
+// {x, y, paths}. x and y are webview-local CSS pixels with the origin at the
+// top left — WailsWebView.m flips AppKit's bottom-left origin before sending
+// them — so the frontend can hand them straight to document.elementFromPoint to
+// find the pane that was dropped on.
+const filesDroppedEvent = "files:dropped"
+
 // Labels for the native "still running" confirmation. MessageDialog matches
 // DefaultButton/CancelButton against the button titles by string equality, so
 // these constants have to be the values passed in both places.
@@ -50,12 +59,11 @@ const (
 )
 
 type App struct {
-	ctx     context.Context
-	ptyMgr  *ptymanager.Manager
-	shell   string
-	cfg     *config.Config
-	cmds    *commands.Store
-	dropDir string
+	ctx    context.Context
+	ptyMgr *ptymanager.Manager
+	shell  string
+	cfg    *config.Config
+	cmds   *commands.Store
 	// closeConfirmed is written from the quit timer / a binding goroutine and
 	// read by beforeClose on whichever goroutine Wails runs it on, so it has to
 	// be atomic rather than a plain bool.
@@ -75,45 +83,127 @@ type App struct {
 
 // NewApp creates a new App instance.
 func NewApp(shell string, cfg *config.Config) *App {
-	dropDir, err := os.MkdirTemp("", "elterminalo-drops-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: cannot create drop directory: %v\n", err)
-	}
 	return &App{
 		shell:        shell,
 		ptyMgr:       ptymanager.NewManager(shell, cfg.Dir()),
 		cfg:          cfg,
 		cmds:         commands.NewStore(cfg.Dir()),
-		dropDir:      dropDir,
 		statsSampler: stats.New(),
 	}
 }
 
 func (a *App) startup(ctx context.Context) {
+	started := time.Now()
 	a.ctx = ctx
 	a.ptyMgr.SetContext(ctx)
 
-	// Clean up any stale backup from a prior update
-	updater.CleanupStaleBackup()
+	// Clean up any stale backup from a prior update.
+	//
+	// On a goroutine because of what it costs in the one case where it does
+	// anything: a backup left behind by an interrupted install makes it shell out
+	// to `codesign --verify` over a whole bundle, and every line below — including
+	// the geometry restore, which is the part the user sees — waits behind it. A
+	// cold start that stalls before the window appears is a bad way to greet
+	// someone whose last update did not finish. It needs nothing from the window
+	// and reports only to the log, and it claims the updater's install latch, so
+	// an ApplyUpdate started in the meantime cannot race it.
+	go func() {
+		cleanupStarted := time.Now()
+		log.Printf("startup: checking for a stale update backup in the background")
+		updater.CleanupStaleBackup()
+		log.Printf("startup: stale-backup check finished in %s", time.Since(cleanupStarted))
+	}()
 
 	// Install shell integration scripts (zsh/bash hooks for OSC 133)
-	_ = shellintegration.Install(a.cfg.Dir())
+	if err := shellintegration.Install(a.cfg.Dir()); err != nil {
+		log.Printf("startup: shell integration not installed: %v", err)
+	}
 
 	// Initialize command history database
 	if store, err := history.NewStore(a.cfg.Dir()); err == nil {
 		a.historyStore = store
 	} else {
-		fmt.Fprintf(os.Stderr, "Warning: history db: %v\n", err)
+		log.Printf("startup: history db unavailable: %v", err)
 	}
 
 	// Clean up partial downloads and old model versions
 	llm.CleanStaleFiles(a.cfg.Dir())
 
+	a.registerFileDrop(ctx)
+
 	// Restore saved window geometry
 	if g := a.cfg.LoadWindowGeometry(); g != nil {
+		log.Printf("startup: restoring window geometry %dx%d at (%d,%d)", g.Width, g.Height, g.X, g.Y)
 		wailsRuntime.WindowSetPosition(ctx, g.X, g.Y)
 		wailsRuntime.WindowSetSize(ctx, g.Width, g.Height)
+	} else {
+		log.Printf("startup: no usable saved window geometry; using the default size")
 	}
+
+	log.Printf("startup: complete in %s", time.Since(started))
+}
+
+// registerFileDrop subscribes to Wails' native file drop and forwards it to the
+// frontend as filesDroppedEvent.
+//
+// This replaces an HTML5 drop handler that read the dropped file's *bytes* in
+// JavaScript, sent them back over the bridge, wrote them into a temp directory
+// and inserted that copy's path into the terminal. A drop of a 2 GB video
+// copied 2 GB; a drop of a folder produced nothing; and the path pasted into
+// the shell was never the path the user dropped. The native handler reports the
+// real absolute paths and copies nothing.
+func (a *App) registerFileDrop(ctx context.Context) {
+	wailsRuntime.OnFileDrop(ctx, func(x, y int, paths []string) {
+		clean := realPaths(paths)
+		if len(clean) == 0 {
+			return
+		}
+		// %q, not %s: the path is whatever the user dragged, and a filename is
+		// the one string in this log line an attacker gets to choose. A name
+		// carrying a newline and a plausible-looking prefix would otherwise write
+		// a second, forged line into the log — and quoting also keeps a name made
+		// of control characters or trailing spaces readable as what it is.
+		log.Printf("file drop: %d path(s) at (%d,%d), first=%q", len(clean), x, y, clean[0])
+		wailsRuntime.EventsEmit(ctx, filesDroppedEvent, map[string]any{
+			"x":     x,
+			"y":     y,
+			"paths": clean,
+		})
+	})
+}
+
+// realPaths keeps only the entries of a native drop payload that name something
+// that actually exists on this filesystem.
+//
+// Everything in that payload went through [NSURL fileSystemRepresentation] in
+// WailsWebView.m, which is applied to *every* URL on the pasteboard rather than
+// only the file ones. A dragged web link therefore arrives as the path part of
+// its URL — "https://example.com/foo/bar?q=1" becomes "/foo/bar" — which is a
+// plausible-looking absolute path that does not exist, and which the frontend
+// would otherwise paste into a shell. A drag that carried no URLs at all (plain
+// text) arrives as a single empty string, because Wails splits the payload on
+// "\n" and an empty payload splits into one empty field.
+//
+// So: absolute paths only, and each one has to pass Lstat. Lstat rather than
+// Stat, because a dropped symlink is a real thing to paste even when its target
+// is gone.
+func realPaths(paths []string) []string {
+	clean := make([]string, 0, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" || !strings.HasPrefix(p, "/") {
+			continue
+		}
+		if _, err := os.Lstat(p); err != nil {
+			continue
+		}
+		clean = append(clean, p)
+	}
+	if discarded := len(paths) - len(clean); discarded > 0 {
+		log.Printf("file drop: kept %d of %d entries; %d were not existing filesystem paths",
+			len(clean), len(paths), discarded)
+	}
+	return clean
 }
 
 // beforeClose runs on every quit attempt (Cmd-Q, the window close button, and
@@ -150,14 +240,45 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 		return true // the user stayed; the deferred clear re-arms the next Cmd-Q
 	}
 
-	// Hand off to the frontend to persist its layout, but never depend on it:
-	// whichever of ConfirmQuit or this timer arrives first commits the quit.
-	wailsRuntime.EventsEmit(ctx, saveAndQuitEvent)
-	time.AfterFunc(saveAndQuitTimeout, a.commitQuit)
+	a.armQuitHandshake(ctx)
 	handshakeStarted = true
 
 	// Prevent this close; the committed one comes back through beforeClose and
 	// takes the closeConfirmed branch above.
+	return true
+}
+
+// armQuitHandshake hands off to the frontend to persist its layout, but never
+// depends on it: whichever of ConfirmQuit or the fallback timer arrives first
+// commits the quit. Callers must already have claimed quitPending.
+func (a *App) armQuitHandshake(ctx context.Context) {
+	log.Printf("quit: asking the frontend to save (%s); committing in %s regardless", saveAndQuitEvent, saveAndQuitTimeout)
+	wailsRuntime.EventsEmit(ctx, saveAndQuitEvent)
+	time.AfterFunc(saveAndQuitTimeout, func() {
+		a.commitQuit("fallback timer after " + saveAndQuitTimeout.String())
+	})
+}
+
+// beginQuit starts the same save-then-quit handshake beforeClose uses, from a
+// caller that is not a close attempt — today, a finished update. It reports
+// false when a quit is already in flight, in which case there is nothing to do:
+// that quit will run shutdown() just as well as this one would have.
+//
+// Unlike beforeClose it asks nothing: the caller has already decided to quit,
+// and there are no running commands worth a second opinion once the bundle
+// under this process has been replaced.
+func (a *App) beginQuit(ctx context.Context) bool {
+	if ctx == nil {
+		// Unreachable from a binding — Wails sets the context in OnStartup
+		// before the webview exists — but EventsEmit on a nil context panics,
+		// and a panic on a binding goroutine takes the whole app down.
+		log.Printf("quit: cannot start the handshake, no window context yet")
+		return false
+	}
+	if !a.quitPending.CompareAndSwap(false, true) {
+		return false
+	}
+	a.armQuitHandshake(ctx)
 	return true
 }
 
@@ -170,6 +291,7 @@ func (a *App) confirmQuitWithUser(ctx context.Context, running int) bool {
 		message = "1 command is still running and will be terminated."
 	}
 
+	log.Printf("quit: %d command(s) still running; showing the confirmation dialog", running)
 	choice, err := wailsRuntime.MessageDialog(ctx, wailsRuntime.MessageDialogOptions{
 		Type:    wailsRuntime.QuestionDialog,
 		Title:   "Quit El Terminalo?",
@@ -185,17 +307,21 @@ func (a *App) confirmQuitWithUser(ctx context.Context, running int) bool {
 		CancelButton:  cancelButtonLabel,
 	})
 	if err != nil {
+		log.Printf("quit: confirmation dialog failed (%v); treating that as Quit rather than trapping the user", err)
 		return true
 	}
+	log.Printf("quit: user chose %q", choice)
 	// Anything that is not an explicit Cancel counts as a Quit, so an
 	// unexpected empty result can never trap the user in the app.
 	return choice != cancelButtonLabel
 }
 
 // commitQuit performs the real quit exactly once, no matter how many of the
-// handshake, the fallback timer, and a stray ConfirmQuit reach it.
-func (a *App) commitQuit() {
+// handshake, the fallback timer, and a stray ConfirmQuit reach it. reason names
+// whichever of them got there first; only the winner logs.
+func (a *App) commitQuit(reason string) {
 	a.quitOnce.Do(func() {
+		log.Printf("quit: committing (%s)", reason)
 		// Must be set before Quit: Wails re-enters beforeClose from there, and
 		// that call has to see the confirmation and allow the close through.
 		a.closeConfirmed.Store(true)
@@ -209,29 +335,44 @@ func (a *App) commitQuit() {
 // completing the handshake beforeClose started. Calling it with no handshake
 // pending still quits cleanly.
 func (a *App) ConfirmQuit() {
-	a.commitQuit()
+	log.Printf("quit: ConfirmQuit received from the frontend")
+	a.commitQuit("frontend confirmed the save")
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	started := time.Now()
+	log.Printf("shutdown: starting")
+
 	// Save window geometry before closing — skip if maximised or fullscreen
 	if !wailsRuntime.WindowIsMaximised(ctx) && !wailsRuntime.WindowIsFullscreen(ctx) {
 		w, h := wailsRuntime.WindowGetSize(ctx)
 		x, y := wailsRuntime.WindowGetPosition(ctx)
-		a.cfg.SaveWindowGeometry(config.WindowGeometry{
+		if err := a.cfg.SaveWindowGeometry(config.WindowGeometry{
 			Width: w, Height: h, X: x, Y: y,
-		})
+		}); err != nil {
+			log.Printf("shutdown: window geometry not saved: %v", err)
+		} else {
+			log.Printf("shutdown: saved window geometry %dx%d at (%d,%d)", w, h, x, y)
+		}
+	} else {
+		log.Printf("shutdown: window is maximised or fullscreen; keeping the previous geometry")
 	}
 
-	// Clean up dropped files
-	if a.dropDir != "" {
-		os.RemoveAll(a.dropDir)
-	}
-
+	// CloseAll is the step that can actually take time — it signals and reaps
+	// every child process — so it is the one worth timing when a user reports a
+	// slow quit.
+	step := time.Now()
 	a.ptyMgr.CloseAll()
+	log.Printf("shutdown: CloseAll took %s", time.Since(step))
 
 	// Close history database
 	if a.historyStore != nil {
-		a.historyStore.Close()
+		step = time.Now()
+		if err := a.historyStore.Close(); err != nil {
+			log.Printf("shutdown: closing the history db failed after %s: %v", time.Since(step), err)
+		} else {
+			log.Printf("shutdown: history db closed in %s", time.Since(step))
+		}
 	}
 
 	// Stop idle timer and free LLM model
@@ -241,7 +382,9 @@ func (a *App) shutdown(ctx context.Context) {
 		a.llmIdleTimer = nil
 	}
 	a.llmMu.Unlock()
+	step = time.Now()
 	a.unloadEngine()
+	log.Printf("shutdown: complete in %s (model unload %s)", time.Since(started), time.Since(step))
 }
 
 // CreateSession creates a new PTY session and returns its ID.
@@ -253,18 +396,34 @@ func (a *App) CreateSession(cols, rows int, cwd string) (string, error) {
 	if rows <= 0 {
 		rows = 24
 	}
-	return a.ptyMgr.CreateSession(cols, rows, cwd)
+	id, err := a.ptyMgr.CreateSession(cols, rows, cwd)
+	if err != nil {
+		log.Printf("session: create failed (cols=%d rows=%d cwd=%q): %v", cols, rows, cwd, err)
+		return "", err
+	}
+	log.Printf("session: created %q (cols=%d rows=%d cwd=%q)", id, cols, rows, cwd)
+	return id, nil
 }
 
-// SessionExists reports whether a PTY session is still alive.
+// AttachSession re-attaches the frontend to an existing PTY session and reports
+// whether it is still alive.
 //
-// Lets the frontend detect a shell that exited before it could subscribe to
-// pty:exit; Wails events are not replayed. The manager removes a session from
-// its map before emitting that event, so a false here means the exit has
-// already fired — missed, if the pane never saw it — and the frontend can
-// synthesize one rather than leave a silently dead pane on screen.
-func (a *App) SessionExists(sessionID string) bool {
-	return a.ptyMgr.HasSession(sessionID)
+// It replaces the old SessionExists probe, which could only answer the question
+// and not act on it. A pane that reloads has to both find out whether its shell
+// is still there and be re-registered as its reader; asking and then attaching
+// as two calls leaves a window in which output is produced with nobody
+// listening. A false here means the shell is gone — the exit event has already
+// fired and the pane missed it — and the frontend can synthesize one rather
+// than leave a silently dead pane on screen.
+func (a *App) AttachSession(sessionID string) bool {
+	return a.ptyMgr.AttachSession(sessionID)
+}
+
+// AckOutput tells the manager the frontend has consumed n bytes of a session's
+// output, so it can let more through. Without this the backend has no idea
+// whether the webview is keeping up, and a command like `yes` buries it.
+func (a *App) AckOutput(sessionID string, n int) {
+	a.ptyMgr.AckOutput(sessionID, n)
 }
 
 // GetSessionCWD returns the current working directory of a session.
@@ -293,7 +452,70 @@ func (a *App) ResizeSession(sessionID string, cols, rows int) {
 
 // CloseSession closes a PTY session.
 func (a *App) CloseSession(sessionID string) {
+	// The id arrives from the webview, so it is as much user-controlled as a
+	// dropped filename is; every string in this file that reaches a log line
+	// from outside the backend is quoted for the same reason.
+	log.Printf("session: closing %q", sessionID)
 	a.ptyMgr.CloseSession(sessionID)
+}
+
+// LogMessage records a line from the frontend in the app log.
+//
+// The webview has no other way to leave a trace: console.log and console.error
+// inside WKWebView go nowhere a user can retrieve after the fact, so a frontend
+// failure used to be entirely invisible unless it happened while Safari's
+// inspector was attached. level is "info", "warn" or "error"; anything else is
+// recorded as info. The message is sanitised — see logging.Frontend.
+func (a *App) LogMessage(level string, message string) {
+	logging.Frontend(level, message)
+}
+
+// RevealLogs shows the log file in Finder.
+//
+// The point of a log nobody can find is small, and "~/.config/elterminalo/logs"
+// is not a path a user can reach through Finder's UI without knowing the
+// keystroke for hidden directories.
+func (a *App) RevealLogs() {
+	path := logging.Path()
+	if path != "" {
+		if _, err := os.Stat(path); err != nil {
+			log.Printf("reveal logs: %q is gone (%v); opening the config directory instead", path, err)
+			path = ""
+		}
+	}
+	if path == "" {
+		// Logging never came up. The config directory is still the right place
+		// to land: it is where a log would have been, and where the state files
+		// worth looking at live.
+		if err := startAndReap(exec.Command(updater.OpenPath, a.cfg.Dir())); err != nil {
+			log.Printf("reveal logs: could not open %q: %v", a.cfg.Dir(), err)
+		}
+		return
+	}
+	// -R reveals the file with it selected, rather than opening it in whatever
+	// the user has associated with .log.
+	if err := startAndReap(exec.Command(updater.OpenPath, "-R", path)); err != nil {
+		log.Printf("reveal logs: could not reveal %q: %v", path, err)
+	}
+}
+
+// startAndReap starts cmd and waits for it on a goroutine.
+//
+// Both halves matter. Start with no matching Wait leaves the finished process as
+// a zombie for as long as the app runs, and this is behind a menu item a user can
+// click any number of times; Wait on this goroutine would instead block a Wails
+// binding — the webview's call does not return until the binding does — on a
+// subprocess, which is not something a menu item may do.
+//
+// updater.OpenPath rather than "open": the same $PATH argument the updater makes
+// for its own tools applies to anything this process execs, and it costs nothing
+// to name the tool on the read-only system volume.
+func startAndReap(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // GetThemes returns the available themes (built-in merged with user themes).
@@ -354,7 +576,13 @@ func (a *App) DeleteTheme(name string) error {
 
 // SaveAppState writes the serialized state JSON to disk atomically.
 func (a *App) SaveAppState(stateJSON string) error {
-	return a.cfg.SaveState(stateJSON)
+	if err := a.cfg.SaveState(stateJSON); err != nil {
+		// The frontend surfaces nothing for this, and it is the failure that
+		// loses a user's whole layout — it has to leave a trace somewhere.
+		log.Printf("state: save failed (%d bytes): %v", len(stateJSON), err)
+		return err
+	}
+	return nil
 }
 
 // LoadAppState reads the saved state JSON from disk.
@@ -375,7 +603,7 @@ func (a *App) LoadAppState() string {
 func (a *App) QuarantineAppState() string {
 	path, err := a.cfg.QuarantineState()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: cannot quarantine state: %v\n", err)
+		log.Printf("state: cannot quarantine the layout that failed to rebuild: %v", err)
 		return ""
 	}
 	return path
@@ -528,9 +756,35 @@ func splitDottedVersion(v string) [3]int {
 	return out
 }
 
-// ApplyUpdate downloads and installs the latest release, then relaunches.
+// ApplyUpdate downloads, verifies and installs the latest release, launches it,
+// and then quits this instance through the same save-then-quit handshake Cmd-Q
+// uses — so shutdown() runs and the window geometry and layout are written out.
+//
+// The updater used to finish with os.Exit(0), which skipped shutdown()
+// entirely: updating cost the user their pane layout and window position, and
+// left the PTY children to be reaped by launchd.
+//
+// Ordering hazard, deliberately left in place for this phase: the updater
+// launches the new bundle with `open -n` *before* this instance has saved
+// anything, so for a moment two instances are alive and both will write
+// state.json. In practice the old one wins — it saves within milliseconds of
+// the handshake, while the new instance needs more than a second to bring up
+// its webview and read the file — but that is a race, not a guarantee, and it
+// resolves the wrong way on a machine slow enough or a save large enough. The
+// fix is to stage the swap and the relaunch into commitQuit, after this
+// instance has finished saving; that is a follow-up, kept out of here to keep
+// this change small.
 func (a *App) ApplyUpdate() error {
-	return updater.ApplyUpdate()
+	if err := updater.ApplyUpdate(); err != nil {
+		return err
+	}
+	if !a.beginQuit(a.ctx) {
+		// Usually because a quit is already in flight — the user hit Cmd-Q
+		// while the download was running — and that one runs shutdown() just as
+		// well as ours would. The new version is running either way.
+		log.Printf("update: installed and relaunched; this instance did not start a quit of its own")
+	}
+	return nil
 }
 
 // IsModelReady returns true if the model is loaded in memory OR exists on disk.
@@ -654,9 +908,6 @@ func (a *App) AskAI(prompt string, cwd string) (string, error) {
 	return result, err
 }
 
-// SaveDroppedFile saves base64-encoded file data to a temp directory
-// and returns the full path. Used for HTML5 drag-and-drop.
-// Files are cleaned up when the app shuts down.
 // RecordCommand records a completed command in the history database.
 func (a *App) RecordCommand(command, cwd string, exitCode int, sessionID string) error {
 	if a.historyStore == nil {
@@ -683,34 +934,4 @@ func (a *App) ClearHistory() error {
 		return nil
 	}
 	return a.historyStore.Clear()
-}
-
-func (a *App) SaveDroppedFile(fileName string, dataBase64 string) (string, error) {
-	if a.dropDir == "" {
-		return "", fmt.Errorf("drop directory not available")
-	}
-
-	// Sanitize filename to prevent path traversal
-	fileName = filepath.Base(fileName)
-
-	data, err := base64.StdEncoding.DecodeString(dataBase64)
-	if err != nil {
-		return "", fmt.Errorf("invalid base64 data: %w", err)
-	}
-
-	if err := os.MkdirAll(a.dropDir, 0755); err != nil {
-		return "", fmt.Errorf("cannot create temp dir: %w", err)
-	}
-
-	dest := filepath.Join(a.dropDir, fileName)
-	absDrop, _ := filepath.Abs(a.dropDir)
-	absDest, _ := filepath.Abs(dest)
-	if !strings.HasPrefix(absDest, absDrop+string(os.PathSeparator)) {
-		return "", fmt.Errorf("invalid file name")
-	}
-	if err := os.WriteFile(dest, data, 0644); err != nil {
-		return "", fmt.Errorf("cannot write file: %w", err)
-	}
-
-	return dest, nil
 }

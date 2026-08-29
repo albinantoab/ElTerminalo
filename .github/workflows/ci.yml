@@ -99,7 +99,13 @@ jobs:
           path: deps/go-llama.cpp
       - name: Stub frontend dist for go:embed
         run: mkdir -p frontend/dist && touch frontend/dist/index.html
-      - run: go test ./...
+      # -race because almost every bug this suite exists to catch is a
+      # concurrency bug: the PTY reader against the close path, overlapping
+      # state saves, the quit handshake against its own fallback timer. Without
+      # it those tests pass while the code is still broken.
+      # -count=1 defeats the test cache, so a green run always means the tests
+      # actually executed against this commit.
+      - run: go test ./... -race -count=1
 
   lint-frontend:
     runs-on: ubuntu-latest

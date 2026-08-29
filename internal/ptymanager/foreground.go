@@ -3,17 +3,18 @@
 package ptymanager
 
 import (
-	"fmt"
 	"os"
-	"os/exec"
-	"runtime"
-	"strings"
 
 	"golang.org/x/sys/unix"
 )
 
 // ForegroundProcess returns the name of the foreground process in this PTY.
 // Returns empty string if the shell itself is in the foreground (idle).
+//
+// Both halves are syscalls: TIOCGPGRP for the group, then processName for the
+// name. The name used to come from a forked `ps -o comm=`, which cost ~2 ms and
+// was paid once per session by GetAllSessionStatuses and once more by
+// RunningCommandCount on every Cmd-Q.
 func (s *Session) ForegroundProcess() string {
 	// A closed session's pid is reaped and can be reused, so stop asking about
 	// it rather than reporting a stranger's command as this pane's.
@@ -44,11 +45,23 @@ func (s *Session) ForegroundProcess() string {
 //
 // It asks the tty, so it only works while the master is open: Close must call it
 // before closing the master, not after.
+//
+// The ioctl goes through withPtmx because it needs the raw fd number, and a
+// number Close has already given up is not an fd that fails — it is an fd the
+// kernel has handed to somebody else, whose foreground group would then be
+// reported as this pane's and signalled by this pane's ladder. Holding the read
+// side for the length of two syscalls is what keeps the number ours for the
+// length of the question; the answer once the master is retired is "no job".
 func (s *Session) foregroundPgid() int {
 	if s.cmd.Process == nil {
 		return 0
 	}
-	pgid, err := unix.IoctlGetInt(int(s.ptmx.Fd()), unix.TIOCGPGRP)
+	var pgid int
+	err := s.withPtmx(func(ptmx *os.File) error {
+		var ioctlErr error
+		pgid, ioctlErr = unix.IoctlGetInt(int(ptmx.Fd()), unix.TIOCGPGRP)
+		return ioctlErr
+	})
 	if err != nil {
 		return 0
 	}
@@ -58,37 +71,4 @@ func (s *Session) foregroundPgid() int {
 		return 0
 	}
 	return pgid
-}
-
-// processName returns the command name for a given PID.
-func processName(pid int) (string, error) {
-	switch runtime.GOOS {
-	case "linux":
-		return processNameFromProc(pid)
-	default:
-		return processNameFromPS(pid)
-	}
-}
-
-// processNameFromProc reads /proc/<pid>/comm (Linux).
-func processNameFromProc(pid int) (string, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(data)), nil
-}
-
-// processNameFromPS uses ps to get the command name (macOS).
-func processNameFromPS(pid int) (string, error) {
-	out, err := exec.Command("ps", "-o", "comm=", "-p", fmt.Sprintf("%d", pid)).Output()
-	if err != nil {
-		return "", err
-	}
-	name := strings.TrimSpace(string(out))
-	// ps returns the full path on macOS — extract just the basename
-	if i := strings.LastIndex(name, "/"); i >= 0 {
-		name = name[i+1:]
-	}
-	return name, nil
 }

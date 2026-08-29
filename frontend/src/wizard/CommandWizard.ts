@@ -1,6 +1,7 @@
 import { CustomCommand } from '../types';
 import { escHtml } from '../utils';
 import { BUILT_IN_SHORTCUTS, SYSTEM_SHORTCUTS } from '../constants';
+import { logError } from '../log';
 
 export interface WizardCallbacks {
   getActivePaneCWD(): Promise<string>;
@@ -220,7 +221,7 @@ export class CommandWizard {
       }
     });
     } catch (e) {
-      console.error('CommandWizard render error:', e);
+      logError('Command wizard failed to render', e);
       this.overlay.innerHTML = '<div class="wizard-box"><div class="wizard-title">Something went wrong</div></div>';
     }
   }
@@ -241,7 +242,7 @@ export class CommandWizard {
         await window.go.main.App.SaveCommand(scope, name, command, description, shortcut, cwd);
       }
     } catch (e) {
-      console.error('Failed to save command:', e);
+      logError(`Failed to save command "${name}"`, e);
     }
     this.hide();
     await this.callbacks.refreshCustomCommands();

@@ -1,4 +1,5 @@
 import { escHtml } from '../utils';
+import { logError } from '../log';
 
 export interface ThemeWizardCallbacks {
   onSave(): Promise<void>;  // called after saving — host should reload themes
@@ -145,7 +146,7 @@ export class ThemeWizard {
       }
     });
     } catch (e) {
-      console.error('ThemeWizard render error:', e);
+      logError('Theme wizard failed to render', e);
       this.overlay.innerHTML = '<div class="theme-wizard-box"><div class="wizard-title">Something went wrong</div></div>';
     }
   }
@@ -183,7 +184,7 @@ export class ThemeWizard {
       this.hide();
       await this.callbacks.onSave();
     } catch (e) {
-      console.error('Failed to save theme:', e);
+      logError(`Failed to save theme "${name}"`, e);
     }
   }
 }

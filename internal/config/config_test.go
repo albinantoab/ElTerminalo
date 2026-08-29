@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // newTestConfig returns a Config rooted at a fresh temp dir, plus the paths of
@@ -514,6 +515,23 @@ func TestQuarantineStateTwiceKeepsBothCopies(t *testing.T) {
 	}
 }
 
+// seedFile writes a file into dir and backdates it by age, so a test can put a
+// scratch file on either side of the sweep's cutoff.
+func seedFile(t *testing.T, dir, name string, age time.Duration) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("seeding %s: %v", name, err)
+	}
+	if age > 0 {
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(path, when, when); err != nil {
+			t.Fatalf("backdating %s: %v", name, err)
+		}
+	}
+	return path
+}
+
 // A crash between writeFileDurable's CreateTemp and its rename leaves a scratch
 // file that nothing ever comes back for, so without a sweep they accumulate for
 // the life of the install. New() calls this against the real config directory;
@@ -538,10 +556,11 @@ func TestSweepTempFilesRemovesCrashDebris(t *testing.T) {
 		stateFileName + failedPrefix + "1836274510",
 		"themes.json",
 	}
+	// Debris is old by definition — it is what a run that is already over left
+	// behind — so it is seeded past the cutoff. The files that must survive are
+	// seeded old too, so nothing here passes merely by being young.
 	for _, name := range append(append([]string{}, debris...), keep...) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(`{}`), 0o600); err != nil {
-			t.Fatalf("seeding %s: %v", name, err)
-		}
+		seedFile(t, dir, name, tempSweepMinAge+time.Hour)
 	}
 
 	sweepTempFiles(dir)
@@ -554,6 +573,34 @@ func TestSweepTempFilesRemovesCrashDebris(t *testing.T) {
 			t.Fatalf("%s = %q after the sweep, want it untouched", name, got)
 		}
 	}
+}
+
+// The sweep used to unlink every match, which made it destructive rather than
+// tidy the moment two instances overlapped — and ApplyUpdate creates exactly
+// that overlap on purpose, launching the new bundle with `open -n` before the
+// old one has saved. Measured: the new instance's New() unlinked the old one's
+// in-flight temp and the old one's rename then failed with ENOENT, so the
+// layout at the moment of the update was the one save that never landed.
+func TestSweepTempFilesSparesAnInFlightWrite(t *testing.T) {
+	dir := t.TempDir()
+
+	// What another instance's writeFileDurable has open right now.
+	inFlight := seedFile(t, dir, stateFileName+".tmp-inflight", 0)
+	// Just inside the cutoff: a write that has been going for nine minutes is
+	// implausible, but it is not this sweep's business to decide it is dead.
+	recent := seedFile(t, dir, stateFileName+".tmp-recent", tempSweepMinAge-time.Minute)
+	// Debris: nothing has come back for this since the crash that left it.
+	stale := seedFile(t, dir, stateFileName+".tmp-stale", tempSweepMinAge+time.Minute)
+
+	sweepTempFiles(dir)
+
+	if got := mustRead(t, inFlight); got != `{}` {
+		t.Fatalf("the sweep destroyed a temp file another instance is writing: %q", got)
+	}
+	if got := mustRead(t, recent); got != `{}` {
+		t.Fatalf("the sweep removed a temp file younger than %s", tempSweepMinAge)
+	}
+	mustNotExist(t, stale)
 }
 
 // The sweep unlinks whatever the glob matches, in a directory the user owns, so

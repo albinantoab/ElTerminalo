@@ -4,8 +4,9 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import '../types/wails.d.ts';
 import type { PtyExitPayload } from '../types/wails.d.ts';
-import { utf8ToBase64 } from '../utils';
-import { CMD } from '../constants';
+import { utf8ToBase64, base64ToBytes } from '../utils';
+import { CMD, ACK_FLUSH_BYTES, ACK_FLUSH_MS } from '../constants';
+import { logError, logWarn } from '../log';
 import { ShellIntegration } from './ShellIntegration';
 import { SmartRenderManager } from './smartrender/SmartRenderManager';
 
@@ -91,6 +92,18 @@ export class TerminalPane {
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private lastCols: number = 0;
   private lastRows: number = 0;
+  // The GPU renderer, when this pane is the one holding a context — see
+  // enableWebgl(). Null means xterm's own canvas renderer is drawing.
+  private webglAddon: WebglAddon | null = null;
+  // Set once a WebGL2 context has been refused, so the failure is reported once
+  // per pane instead of on every tab switch. Enabling is still retried: the
+  // usual reason for a refusal is a momentarily full context budget, which the
+  // next switch has probably freed.
+  private webglRefusalReported = false;
+  // Bytes written to xterm but not yet acknowledged to the backend, and the
+  // timer that flushes them when the flood stops short of the byte threshold.
+  private pendingAckBytes = 0;
+  private ackTimer: ReturnType<typeof setTimeout> | null = null;
   private ctxActions: TerminalContextActions | null = null;
   public shellIntegration: ShellIntegration;
   public smartRender: SmartRenderManager;
@@ -195,13 +208,8 @@ export class TerminalPane {
     // default context menu can't see terminal selections.
     this.initContextMenu(container);
 
-    // Try WebGL renderer for GPU acceleration
-    try {
-      const webglAddon = new WebglAddon();
-      this.terminal.loadAddon(webglAddon);
-    } catch (e) {
-      console.warn('WebGL addon failed, using canvas renderer');
-    }
+    // No WebGL here on purpose: a context is only worth holding while the pane
+    // is on screen, and the host decides that — see enableWebgl().
 
     this.fitAddon.fit();
 
@@ -249,9 +257,18 @@ export class TerminalPane {
       // don't belong in a restarted shell's screen, and a disposed terminal
       // would throw on the write.
       if (this.disposed || this.sessionId !== sid) return;
-      // Decode base64 and write to terminal
-      const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
-      this.terminal.write(bytes);
+      const bytes = base64ToBytes(data);
+      // The callback is xterm's own "I have finished with this chunk" signal,
+      // and the only honest moment to acknowledge it: acking on arrival would
+      // tell the backend to keep reading while the bytes are still queued in
+      // the renderer, which is the stall this flow control exists to prevent.
+      this.terminal.write(bytes, () => {
+        // The write queue drains asynchronously, so by now the pane may have
+        // been disposed or restarted onto a new session. Those bytes were
+        // never this session's to account for.
+        if (this.disposed || this.sessionId !== sid) return;
+        this.queueAck(sid, bytes.length);
+      });
     });
 
     // Subscribe to PTY exit. The payload separates a clean `exit` from a crash
@@ -277,18 +294,21 @@ export class TerminalPane {
     this.lastCols = this.terminal.cols;
     this.lastRows = this.terminal.rows;
 
-    // A shell that dies immediately can emit its exit before the subscription
-    // above existed, and Wails does not replay events — the pane would then sit
-    // there quietly dead, with nothing on screen and Enter doing nothing. The
-    // backend drops the session from its map *before* emitting the exit, so
-    // asking now is decisive: `true` means the event is still to come, `false`
-    // means it already fired — either already handled above, or missed.
+    // Now that both listeners exist, claim the session. Two things come out of
+    // this one call. The backend flushes whatever the shell wrote between
+    // CreateSession and here — a fast banner, or a shell that printed an error
+    // and quit — which no listener could have caught, and Wails does not replay
+    // events. And it reports whether the session is still there: the backend
+    // drops it from its map *before* emitting the exit, so the answer is
+    // decisive — `true` means the event is still to come, `false` means it has
+    // already fired, either handled above or missed entirely.
     let stillThere = true;
     try {
-      stillThere = await window.go.main.App.SessionExists(sid);
-    } catch {
+      stillThere = await window.go.main.App.AttachSession(sid);
+    } catch (e) {
       // No answer is not an answer: assume the shell is alive rather than
       // declaring a working pane dead on a transient binding failure.
+      logWarn(`AttachSession failed for session ${sid}; assuming the shell is alive`, e);
     }
     if (!stillThere && !this.disposed && this.sessionId === sid) {
       // The real status went with the event that was lost, so this is the
@@ -309,6 +329,68 @@ export class TerminalPane {
     });
   }
 
+  /** Type text into this pane's shell on the app's own behalf — a dropped file
+   *  path, say. A no-op on a dead pane, exactly like a keystroke. */
+  sendText(text: string): void {
+    this.sendInput(text);
+  }
+
+  /** Paste text into this pane on the app's own behalf — text or a link dragged
+   *  in from another application. Goes through xterm's paste path, exactly like
+   *  Cmd+V and the context menu: writing it as raw input would skip bracketed
+   *  paste, and a multi-line drop would then run line by line the moment it
+   *  landed instead of sitting on the command line to be looked at. */
+  pasteText(text: string): void {
+    if (this.disposed || !this.sessionId) return;
+    this.terminal.paste(text);
+  }
+
+  /** Count `n` more written bytes towards this session's acknowledgement, and
+   *  send it once it is worth a binding call. A flood arrives as thousands of
+   *  small chunks, so acking each one would put more traffic on the bridge than
+   *  the output itself; the timer is what guarantees the last few hundred bytes
+   *  of a quiet session are still acknowledged. */
+  private queueAck(sid: string, n: number): void {
+    this.pendingAckBytes += n;
+    if (this.pendingAckBytes >= ACK_FLUSH_BYTES) {
+      this.flushAck(sid);
+      return;
+    }
+    if (!this.ackTimer) {
+      this.ackTimer = setTimeout(() => {
+        this.ackTimer = null;
+        this.flushAck(sid);
+      }, ACK_FLUSH_MS);
+    }
+  }
+
+  private flushAck(sid: string): void {
+    if (this.ackTimer) {
+      clearTimeout(this.ackTimer);
+      this.ackTimer = null;
+    }
+    const n = this.pendingAckBytes;
+    this.pendingAckBytes = 0;
+    // A session this pane has retired is gone from the backend's books along
+    // with its byte count; the binding would ignore the id anyway.
+    if (n <= 0 || this.sessionId !== sid) return;
+    window.go.main.App.AckOutput(sid, n).catch(() => {
+      // The shell can exit between the write and the ack. Nothing left to
+      // unblock, and the exit handler is what tells the user.
+    });
+  }
+
+  /** Drop the outstanding acknowledgement. Called when the session it belonged
+   *  to is retired: the backend has forgotten the session and its counter, so
+   *  those bytes are no longer owed to anyone. */
+  private cancelAcks(): void {
+    if (this.ackTimer) {
+      clearTimeout(this.ackTimer);
+      this.ackTimer = null;
+    }
+    this.pendingAckBytes = 0;
+  }
+
   /** Detach from the current session's events and forget its id — from here on
    *  the pane is dead: getCWD() falls back to the cache, input is ignored.
    *
@@ -326,6 +408,8 @@ export class TerminalPane {
     this.eventCleanup = null;
     this.exitEventCleanup = null;
     this.sessionId = '';
+    // Whatever was still owed belonged to the session just retired.
+    this.cancelAcks();
     if (!offOutput && !offExit) return;
     queueMicrotask(() => {
       if (offOutput) offOutput();
@@ -392,7 +476,7 @@ export class TerminalPane {
     try {
       await this.connect(this.lastKnownCwd);
     } catch (e) {
-      console.error('Failed to restart shell:', e);
+      logError(`Failed to restart shell in ${this.lastKnownCwd || 'the default directory'}`, e);
       this.showStartFailure(e);
     }
   }
@@ -409,25 +493,18 @@ export class TerminalPane {
     if (this.resizeTimer) {
       clearTimeout(this.resizeTimer);
     }
-    this.resizeTimer = setTimeout(async () => {
+    this.resizeTimer = setTimeout(() => {
       this.resizeTimer = null;
       // A pane whose shell has exited has nothing left to resize.
       if (!this.sessionId) return;
+      // Resizing the pty is the whole job: the kernel raises SIGWINCH and the
+      // foreground program — zsh, vim, less — redraws itself. A terminal does
+      // not type on the user's behalf, and the \x0c this used to append landed
+      // in whatever was running whenever the idle probe was wrong or failed.
+      //
       // Fire-and-forget: the binding returns a promise, so a shell that died
       // between the check above and here must be caught, not thrown.
       window.go.main.App.ResizeSession(this.sessionId, cols, rows).catch(() => {});
-      // Clear stale prompt artifacts after resize — only when the shell is idle.
-      // If a process is running (yarn dev, etc.), SIGWINCH from the PTY resize
-      // is enough. Sending \x0c to a running process prints ^L.
-      if (this.terminal.buffer.active.type === 'normal') {
-        try {
-          const statuses = await window.go.main.App.GetAllSessionStatuses();
-          const status = statuses[this.sessionId];
-          if (status?.isIdle) {
-            window.go.main.App.WriteToSession(this.sessionId, utf8ToBase64('\x0c')).catch(() => {});
-          }
-        } catch { /* skip clear on error */ }
-      }
     }, 150);
   }
 
@@ -661,7 +738,59 @@ export class TerminalPane {
   }
 
   setTheme(theme: XtermTheme): void {
+    // Renderer-agnostic: xterm pushes the new colours into whichever renderer
+    // is attached, so this works the same with or without WebGL.
     this.terminal.options.theme = theme;
+  }
+
+  /** Hand this pane a GPU renderer. Idempotent, and only worth calling while
+   *  the pane is actually on screen: a WebGL context is a scarce, browser-wide
+   *  resource — past the cap the oldest ones are dropped, and the pane that
+   *  owned one goes blank. So contexts follow visibility, and the host gives
+   *  them back on the way out (see disableWebgl).
+   *
+   *  A context lost anyway — the tab count crept up, the GPU reset, the machine
+   *  woke from sleep — is caught rather than left to blank the pane: xterm's
+   *  addon waits ~3s for the browser to restore it (`WebglRenderer`: "Wait a
+   *  few seconds to see if the 'webglcontextrestored' event is fired. If not,
+   *  dispatch the onContextLoss notification to observers") and only then tells
+   *  us, at which point disposing the addon puts xterm's own canvas renderer
+   *  back — a slower pane, but a visible one. */
+  enableWebgl(): void {
+    if (this.disposed || this.webglAddon) return;
+    try {
+      const addon = new WebglAddon();
+      addon.onContextLoss(() => {
+        logWarn(`WebGL context lost for pane (session ${this.sessionId || 'none'}); falling back to the canvas renderer`);
+        this.disableWebgl();
+      });
+      this.terminal.loadAddon(addon);
+      this.webglAddon = addon;
+    } catch (e) {
+      // No context to be had — this webview has no WebGL2, or its budget is
+      // full right now. Canvas draws the pane perfectly well either way.
+      this.webglAddon = null;
+      if (!this.webglRefusalReported) {
+        this.webglRefusalReported = true;
+        logWarn('WebGL renderer unavailable for this pane; using xterm\'s canvas renderer', e);
+      }
+    }
+  }
+
+  /** Give the GPU context back. Disposing the addon is what restores xterm's
+   *  canvas renderer, so the pane keeps drawing. Idempotent, and safe to call
+   *  from inside the addon's own onContextLoss. */
+  disableWebgl(): void {
+    const addon = this.webglAddon;
+    if (!addon) return;
+    // Cleared first so a re-entrant call — the context loss handler firing
+    // while dispose() is unwinding — finds nothing left to do.
+    this.webglAddon = null;
+    try {
+      addon.dispose();
+    } catch (e) {
+      logWarn('Failed to dispose the WebGL renderer', e);
+    }
   }
 
   dispose(): void {
@@ -683,6 +812,9 @@ export class TerminalPane {
       this.resizeTimer = null;
     }
     if (this.resizeObserver) this.resizeObserver.disconnect();
+    // Before terminal.dispose(): the addon's teardown reaches back into the
+    // terminal's render service to reinstate the canvas renderer.
+    this.disableWebgl();
     // A pane whose shell already exited has no session left to close, and the
     // backend ignores ids it doesn't know — either way this must not throw.
     if (sid) {

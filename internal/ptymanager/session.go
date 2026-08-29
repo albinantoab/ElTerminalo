@@ -2,6 +2,7 @@ package ptymanager
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,17 +52,79 @@ const groupPollInterval = 10 * time.Millisecond
 type Session struct {
 	ID        string
 	cmd       *exec.Cmd
-	ptmx      *os.File
 	closeOnce sync.Once
+
+	// ptmxMu guards the master's fd *number*, not the bytes that go through it.
+	// See withPtmx for who has to hold it and why Read and Write do not.
+	ptmxMu     sync.RWMutex
+	ptmx       *os.File
+	ptmxClosed bool
 
 	// closed is set before the shutdown ladder starts. Once the child has been
 	// reaped the kernel is free to hand its pid to an unrelated process, so
 	// CWD() and ForegroundProcess() must stop probing it.
 	closed atomic.Bool
 
+	// closingCh is the selectable form of closed: it is closed as Close begins,
+	// before anything on the ladder can block. readLoop's exit path waits on it
+	// so that closing a pane — or quitting the app — never has to sit out the
+	// attach grace for a shell that has already died.
+	closingCh chan struct{}
+
+	// panicked records that a goroutine of this session's own died on a panic.
+	// The exit status is then meaningless — the shell may be perfectly healthy
+	// and simply have nobody left to read it — so the pane is reported as the
+	// unknown pair rather than as whatever the shutdown ladder happened to see.
+	panicked atomic.Bool
+
 	statusMu   sync.Mutex
 	exitCode   int
 	exitSignal string
+
+	// --- flow control (the reader's half of the output bridge) ---
+	//
+	// Every batch the flusher emits becomes an evaluateJavaScript call on the
+	// webview's main thread. Reading the pty as fast as the shell writes it —
+	// which is what the reader did before — means a `cat` of a large file
+	// outruns the UI by megabytes and stalls it, because nothing in Wails pushes
+	// back. So the frontend acknowledges what it has rendered and the reader
+	// spends that credit.
+	//
+	// unacked is the credit outstanding: raw bytes taken off the pty that
+	// AckOutput has not confirmed. It is charged when the bytes leave the pty
+	// rather than when they are emitted, which makes it one counter for two jobs
+	// — bytes waiting in the batch buffer are equally unrenderable, and output
+	// held back because the pane has not attached yet is bounded by the same
+	// mark with no second accounting.
+	//
+	// At highWater the reader parks; an ack that brings the backlog back to
+	// lowWater releases it. The gap between the two marks is the whole point:
+	// waking at the same mark it slept on would restart the reader once per
+	// batch. While it is parked nothing drains the tty, the kernel's tty buffer
+	// fills, and the child blocks in write(2) — that is the only backpressure a
+	// pty offers, and reaching it is the goal.
+	flowMu   sync.Mutex
+	flowCond *sync.Cond
+	unacked  int
+	// paused is the state, not a derived value: the reader stays parked all the
+	// way down from highWater to lowWater, so "should I be reading" cannot be
+	// recomputed from unacked alone.
+	paused bool
+	// flowClosed releases a parked reader for good. Without it a session closed
+	// while the reader is parked would leave that goroutine waiting on a
+	// condition only the frontend could satisfy — for a pane the frontend has
+	// already thrown away.
+	flowClosed bool
+
+	// --- attach (the frontend's subscription handshake) ---
+	//
+	// A session starts unattached and its output accumulates instead of being
+	// emitted. Wails does not replay events and CreateSession starts reading the
+	// pty before its id has even been returned, so a fast shell's first prompt
+	// used to be emitted into a subscription that did not exist yet. attachedCh
+	// is closed once, by attach, to wake the flusher.
+	attachOnce sync.Once
+	attachedCh chan struct{}
 }
 
 // NewSession spawns a shell in a new PTY. If cwd is empty, defaults to home.
@@ -75,7 +138,7 @@ func NewSession(shell, configDir string, cols, rows int, cwd string) (*Session, 
 	}
 
 	home, _ := os.UserHomeDir()
-	dir := resolveStartDir(cwd, home)
+	dir, fallback := resolveStartDir(cwd, home)
 
 	cmd := exec.Command(shell, "-l")
 	cmd.Dir = dir
@@ -123,19 +186,84 @@ func NewSession(shell, configDir string, cols, rows int, cwd string) (*Session, 
 		retry.Env = env
 		cmd = retry
 		ptmx, err = pty.StartWithSize(cmd, ws)
+		fallback = fmt.Sprintf("shell could not start in %s", dir)
+		dir = home
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to start pty: %w", err)
 	}
 
-	return &Session{
+	s := &Session{
 		ID:   uuid.New().String(),
 		cmd:  cmd,
 		ptmx: ptmx,
 		// Until the shell has been reaped there is no status to report; -1 with
 		// no signal is the same "unknown" the ladder falls back to.
-		exitCode: -1,
-	}, nil
+		exitCode:   -1,
+		closingCh:  make(chan struct{}),
+		attachedCh: make(chan struct{}),
+	}
+	s.flowCond = sync.NewCond(&s.flowMu)
+
+	// One line per pane, with the fallback reason spelled out rather than left
+	// to be inferred from the directory: panes silently reopening in $HOME is a
+	// bug this package has already shipped once, and it is invisible in a log
+	// that only records where the shell ended up.
+	log.Printf("ptymanager: session %s spawned pid=%d shell=%s dir=%q fallback=%q",
+		shortID(s.ID), cmd.Process.Pid, shell, dir, fallback)
+
+	return s, nil
+}
+
+// shortID is the first 8 characters of a session id — enough to follow one pane
+// through the log without pasting a full uuid onto every line.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// withPtmx runs fn against the pty master while the fd number underneath it is
+// still ours, and answers os.ErrClosed once it is not.
+//
+// Every caller that reaches for the raw descriptor has to come through here:
+// foregroundPgid's TIOCGPGRP, and Resize by way of pty.Setsize. A file
+// descriptor is a small integer the kernel reuses the moment it is free, so an
+// ioctl issued on a number Close has already given up is not a failed ioctl —
+// it is an ioctl answered by whatever holds that number now, which in this
+// process is realistically another pane's master. TIOCGPGRP would then report
+// that pane's foreground job as this one's, and Close would signal its process
+// group.
+//
+// The write side is taken only around the master's close, so a probe either
+// completes with the fd alive or finds ptmxClosed already set: the kernel cannot
+// release the number before *os.File.Close has been called, and this holds it
+// shut for exactly that call. Probes are two syscalls long, so Close never waits
+// on one for any measurable time.
+//
+// Read and Write deliberately do not use this. They block for as long as the
+// shell is quiet — holding a lock across that would make Close wait for the next
+// keystroke — and they go through *os.File rather than the bare number, which
+// the runtime already makes safe against a concurrent Close: the reader holds a
+// reference for the length of the call, and the descriptor is not released until
+// it returns.
+func (s *Session) withPtmx(fn func(ptmx *os.File) error) error {
+	s.ptmxMu.RLock()
+	defer s.ptmxMu.RUnlock()
+	if s.ptmxClosed {
+		return os.ErrClosed
+	}
+	return fn(s.ptmx)
+}
+
+// closePtmx retires the master, under the write lock so that no probe can be
+// part-way through an ioctl on its fd while the number is being given up.
+func (s *Session) closePtmx() {
+	s.ptmxMu.Lock()
+	defer s.ptmxMu.Unlock()
+	s.ptmxClosed = true
+	s.ptmx.Close()
 }
 
 // Read reads from the PTY. Blocks until data is available.
@@ -148,11 +276,115 @@ func (s *Session) Write(data []byte) (int, error) {
 	return s.ptmx.Write(data)
 }
 
+// charge counts n bytes of output against the frontend's credit. Called by the
+// reader as the bytes come off the pty, before they are handed to the flusher.
+func (s *Session) charge(n int) {
+	s.flowMu.Lock()
+	s.unacked += n
+	s.flowMu.Unlock()
+}
+
+// ack releases n bytes of credit and, once the backlog is back under lowWater,
+// wakes a parked reader.
+func (s *Session) ack(n int) {
+	s.flowMu.Lock()
+	defer s.flowMu.Unlock()
+
+	s.unacked -= n
+	if s.unacked < 0 {
+		// A frontend that acks more than it was sent must not be able to buy
+		// itself credit it never spent, or a bug on that side turns straight back
+		// into the unbounded reader this exists to prevent.
+		s.unacked = 0
+	}
+	if s.paused && s.unacked <= lowWater {
+		s.paused = false
+		log.Printf("ptymanager: session %s reader resumed unacked=%d", shortID(s.ID), s.unacked)
+		s.flowCond.Broadcast()
+	}
+}
+
+// waitForCredit parks the reader while the frontend is too far behind, and
+// reports whether it should read again.
+//
+// It is called before each read, not after: the point is to leave the bytes in
+// the tty buffer, where they block the child, rather than to pull them out and
+// queue them somewhere of our own.
+//
+// False means stop. Still being paused after the wait is what says the wake came
+// from Close rather than from an ack — the frontend is never going to catch up,
+// the master is closed, and reading on would only park this goroutine on a tty
+// nobody will ever write to again.
+//
+// One consequence is worth stating outright: a parked reader is not watching the
+// pty, so it does not see EOF either. A shell that produces a megabyte and then
+// dies while the frontend owes every byte of it stays in the map, and its
+// pty:exit waits for the ack that releases the reader. Only two things reach it
+// there — an ack, or Close — and that is the correct trade: noticing the exit
+// would mean reading, and reading is the thing being refused. Close is what
+// covers the case where the frontend never comes back.
+func (s *Session) waitForCredit() bool {
+	s.flowMu.Lock()
+	defer s.flowMu.Unlock()
+
+	if !s.paused && s.unacked >= highWater {
+		s.paused = true
+		log.Printf("ptymanager: session %s reader paused unacked=%d", shortID(s.ID), s.unacked)
+	}
+	for s.paused && !s.flowClosed {
+		s.flowCond.Wait()
+	}
+	return !s.paused
+}
+
+// closeFlow releases a parked reader permanently. Close calls it first, before
+// anything that could block, because the ladder below it ends with a wait for a
+// child whose output nobody is draining.
+func (s *Session) closeFlow() {
+	s.flowMu.Lock()
+	s.flowClosed = true
+	s.flowMu.Unlock()
+	s.flowCond.Broadcast()
+}
+
+// flowState reports the reader's flow-control state, for the tests that assert
+// the reader really stops rather than merely slows down.
+func (s *Session) flowState() (unacked int, paused bool) {
+	s.flowMu.Lock()
+	defer s.flowMu.Unlock()
+	return s.unacked, s.paused
+}
+
+// attach marks the pane as subscribed and wakes the flusher, which then emits
+// everything held since spawn before anything newer.
+//
+// Idempotent on purpose: the frontend re-attaches whenever it re-subscribes,
+// and closing a channel twice panics.
+func (s *Session) attach() {
+	s.attachOnce.Do(func() {
+		log.Printf("ptymanager: session %s attached", shortID(s.ID))
+		close(s.attachedCh)
+	})
+}
+
+// closing is closed once Close has started. It is what lets a wait for the
+// frontend be abandoned the moment the pane is being torn down anyway — see the
+// attach grace in readLoop's exit path.
+func (s *Session) closing() <-chan struct{} {
+	return s.closingCh
+}
+
 // Resize changes the PTY dimensions.
+//
+// pty.Setsize is a TIOCSWINSZ on the master's raw fd, so it goes through
+// withPtmx for the same reason the foreground probe does: a resize landing on a
+// recycled descriptor would reshape another pane's terminal.
 func (s *Session) Resize(cols, rows int) error {
-	return pty.Setsize(s.ptmx, &pty.Winsize{
-		Cols: uint16(cols),
-		Rows: uint16(rows),
+	return s.withPtmx(func(ptmx *os.File) error {
+		return pty.Setsize(ptmx, &pty.Winsize{
+			Cols: uint16(cols),
+			Rows: uint16(rows),
+		})
 	})
 }
 
@@ -180,9 +412,21 @@ func (s *Session) Resize(cols, rows int) error {
 // rather than "close the fd and wait".
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
+		start := time.Now()
+
 		// Set before anything else: from here on the pid is on its way to being
-		// reaped and must not be probed by CWD()/ForegroundProcess().
+		// reaped and must not be probed by CWD()/ForegroundProcess(). The channel
+		// says the same thing to anyone who has to wait on it rather than poll it
+		// — readLoop's exit path, which must not hold a quit up for its own attach
+		// grace once the pane is being closed anyway.
 		s.closed.Store(true)
+		close(s.closingCh)
+
+		// Release the reader before anything that waits. If flow control has it
+		// parked — the frontend fell behind, or the pane was closed before it ever
+		// attached — nothing below will ever satisfy the condition it is waiting
+		// on, and it would sit there for the life of the process.
+		s.closeFlow()
 
 		// Ask the tty which process group it has in the foreground before the
 		// master is closed — afterwards the ioctl has no answer, and this is the
@@ -213,9 +457,15 @@ func (s *Session) Close() {
 		// still holding the slave open). Close deliberately does not wait for
 		// that: a blocking fd would deadlock the ladder that is about to make it
 		// happen.
-		s.ptmx.Close()
+		//
+		// Done under the write lock so that no probe is part-way through an ioctl
+		// on this fd as the number is given up, and so every probe after this
+		// point is answered with ErrClosed rather than by whoever the kernel hands
+		// that number to next. See withPtmx.
+		s.closePtmx()
 
 		if s.cmd.Process == nil {
+			log.Printf("ptymanager: session %s closed before its shell started", shortID(s.ID))
 			return
 		}
 		// pty.StartWithSize starts the shell with Setsid, so it leads its own
@@ -246,8 +496,13 @@ func (s *Session) Close() {
 		// that window rather than closing it: the goroutine's close(reaped) is
 		// deferred and so runs after cmd.Wait has already released the pid, and in
 		// that gap this still reports "not reaped".
+		// rung records how far down the ladder this session had to be walked, for
+		// the log line at the end. "self" means it was already gone when Close
+		// started — the read loop's EOF path — and needed no signal at all.
+		rung := "self"
 		if !isReaped(reaped) {
 			signalGroup(pgid, syscall.SIGHUP)
+			rung = "hangup"
 		}
 		if !waitFor(reaped, hangupGrace) {
 			// The shell declined the hangup. Escalate on it — and on the foreground
@@ -255,10 +510,16 @@ func (s *Session) Close() {
 			// it is waiting on the job, and the job ignored its own hangup.
 			signalGroup(pgid, syscall.SIGTERM)
 			signalGroup(fgPgid, syscall.SIGTERM)
+			rung = "terminate"
 			if !waitFor(reaped, terminateGrace) {
 				signalGroup(pgid, syscall.SIGKILL)
 				signalGroup(fgPgid, syscall.SIGKILL)
-				waitFor(reaped, killGrace)
+				rung = "kill"
+				if !waitFor(reaped, killGrace) {
+					// Outlived SIGKILL: wedged in an uninterruptible syscall. This is
+					// the (-1, "") status ExitStatus documents.
+					rung = "unresponsive"
+				}
 			}
 		}
 
@@ -268,6 +529,13 @@ func (s *Session) Close() {
 		// npm-run-dev-still-holding-its-port case behind the quit dialog's
 		// "N commands are still running and will be terminated".
 		stopForegroundGroup(fgPgid)
+
+		code, signal := s.ExitStatus()
+		// The rung and the elapsed time are the two numbers that turn "quitting is
+		// slow" into an answer: a quit that costs seconds is one pane sitting on
+		// the terminate rung, and this says which.
+		log.Printf("ptymanager: session %s exited code=%d signal=%q rung=%s ms=%d",
+			shortID(s.ID), code, signal, rung, time.Since(start).Milliseconds())
 	})
 }
 
@@ -398,7 +666,11 @@ func isReaped(reaped <-chan struct{}) bool {
 	}
 }
 
-// resolveStartDir decides which directory a new shell should start in.
+// resolveStartDir decides which directory a new shell should start in, and says
+// why when it did not use the one it was asked for. why is "" when the request
+// was honoured; it goes straight into the spawn log line, because a pane that
+// quietly reopens somewhere else is precisely the bug this function exists to
+// prevent and is invisible in a log that only records where the shell ended up.
 //
 // It falls back to home only when the requested directory is provably gone.
 // The Stat below runs in the app process against a path that is normally under
@@ -408,20 +680,19 @@ func isReaped(reaped <-chan struct{}) bool {
 // reopened every pane in $HOME, and the 30s layout autosave then wrote $HOME
 // back into state.json — turning a momentary denial into permanent loss of the
 // user's folders. Anything other than "does not exist" keeps the directory.
-func resolveStartDir(cwd, home string) string {
-	dir := cwd
-	if dir == "" {
-		return home
+func resolveStartDir(cwd, home string) (dir, why string) {
+	if cwd == "" {
+		return home, "no directory requested"
 	}
-	info, err := os.Stat(dir)
+	info, err := os.Stat(cwd)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return home
+			return home, "requested directory does not exist"
 		}
-		return dir
+		return cwd, ""
 	}
 	if !info.IsDir() {
-		return home
+		return home, "requested path is not a directory"
 	}
-	return dir
+	return cwd, ""
 }

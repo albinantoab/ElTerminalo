@@ -1,5 +1,6 @@
 import { escHtml, utf8ToBase64 } from '../utils';
 import { CMD } from '../constants';
+import { logError } from '../log';
 
 export interface AskAICallbacks {
   getActiveSessionId(): string;
@@ -124,7 +125,7 @@ export class AskAI {
       input.addEventListener('keydown', (e) => e.stopPropagation());
     }
     } catch (e) {
-      console.error('AskAI render error:', e);
+      logError('AI panel failed to render', e);
       this.overlay.innerHTML = '<div class="ai-box"><div class="ai-title">Something went wrong</div></div>';
     }
   }

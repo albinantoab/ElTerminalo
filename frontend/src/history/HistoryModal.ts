@@ -1,6 +1,7 @@
 import type { HistoryEntry } from '../types/wails.d.ts';
 import { escHtml, utf8ToBase64 } from '../utils';
 import { CMD } from '../constants';
+import { logError } from '../log';
 
 export interface HistoryModalCallbacks {
   getActiveSessionId(): string;
@@ -191,7 +192,7 @@ export class HistoryModal {
         });
       }
     } catch (e) {
-      console.error('Render error:', e);
+      logError('History modal failed to render', e);
       this.overlay.innerHTML = '<div class="error">Something went wrong</div>';
     }
   }

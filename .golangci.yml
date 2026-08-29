@@ -38,5 +38,3 @@ issues:
     - path: internal/ptymanager/
       linters: [errcheck]
       text: (Resize|Kill|Wait)
-    - path: internal/updater/
-      linters: [errcheck, gocritic]

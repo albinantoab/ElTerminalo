@@ -367,7 +367,7 @@ ok "created ${DMG}"
 # ═══════════════════════════════════════════════════════════════════════
 # Step 8 — ZIP for the auto-updater
 #
-# ditto, not zip: the updater extracts with Go's archive/zip, and `zip` plus
+# ditto, not zip: the updater extracts with ditto -x -k, and `zip` plus
 # that extractor turns symlinks into regular files containing the link text.
 # Harmless for today's flat bundle, fatal the moment a framework is added.
 # ═══════════════════════════════════════════════════════════════════════

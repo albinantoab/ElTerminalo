@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -43,6 +44,9 @@ const (
 	// quarantineAttempts bounds how many names QuarantineState tries before it
 	// gives up: the timestamped one plus quarantineAttempts-1 numbered variants.
 	quarantineAttempts = 100
+	// tempSweepMinAge is how old a scratch file has to be before the sweep will
+	// unlink it. See sweepTempFiles for why it is not zero.
+	tempSweepMinAge = 10 * time.Minute
 )
 
 // Config manages the application's configuration directory and state persistence.
@@ -71,24 +75,40 @@ func New() (*Config, error) {
 	return &Config{dir: dir}, nil
 }
 
-// sweepTempFiles deletes writeFileDurable's scratch files from dir.
+// sweepTempFiles deletes writeFileDurable's abandoned scratch files from dir.
 //
 // A crash between the CreateTemp and the rename — a panic, a kill -9, a power
 // loss — leaves a state.json.tmp-<random> behind, and nothing ever comes back
-// for it, so they accumulate for the life of the install. Startup is the one
-// moment this is safe to do wholesale: this process is the only writer of those
-// names and it has not written any yet, so every match is debris from a run
-// that is already over. Failures are ignored — a file that cannot be removed is
-// litter, not a reason to refuse to start.
+// for it, so they accumulate for the life of the install.
+//
+// The age bound is what stops this from being a bug of its own. "Startup, so
+// this process is the only writer and it has not written any yet" is only true
+// when there is one process: ApplyUpdate deliberately runs `open -n` on the new
+// bundle *before* this instance has saved, so the new instance's New() sweeps
+// the config directory while the old instance is mid-save. Measured, that is
+// exactly what happened — the sweep unlinked the in-flight temp and the old
+// instance's rename failed with ENOENT, so the layout at the moment of the
+// update was the one save that never landed. A scratch file that is still live
+// is seconds old at most; ten minutes is far past any write that is still going
+// to complete and far short of "these have been here since the last crash".
+//
+// Failures are ignored — a file that cannot be removed is litter, not a reason
+// to refuse to start.
 func sweepTempFiles(dir string) {
 	matches, err := filepath.Glob(filepath.Join(dir, "*"+tempSuffix))
 	if err != nil {
 		return
 	}
+	cutoff := time.Now().Add(-tempSweepMinAge)
 	for _, path := range matches {
 		// Only ever unlink a plain file: the pattern is broad enough to catch a
 		// directory somebody put here, and this is the user's config directory.
-		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			// Young enough that another instance may still be writing it.
 			continue
 		}
 		_ = os.Remove(path)
@@ -230,12 +250,14 @@ func (c *Config) LoadState() string {
 		}
 		// Present but unreadable (permissions, I/O error). Leave it alone and
 		// try the backup rather than reporting "no layout".
+		log.Printf("state: %s exists but cannot be read (%v); trying the backup", stateFileName, err)
 		return c.loadStateBackup()
 	}
 
 	// json.Valid rejects empty and whitespace-only files too, which is what a
 	// power loss during the old non-fsync'd write used to leave behind.
 	if json.Valid(data) {
+		log.Printf("state: loaded %s (%d bytes)", stateFileName, len(data))
 		return string(data)
 	}
 
@@ -244,9 +266,11 @@ func (c *Config) LoadState() string {
 	quarantine := fmt.Sprintf("%s%s%d", path, corruptPrefix, time.Now().Unix())
 	if err := os.Rename(path, quarantine); err != nil {
 		// Could not move it aside — still prefer the backup over the garbage.
+		log.Printf("state: %s is corrupt (%d bytes) and could not be quarantined: %v", stateFileName, len(data), err)
 		return c.loadStateBackup()
 	}
 	syncDir(c.dir)
+	log.Printf("state: %s did not parse (%d bytes); quarantined as %s", stateFileName, len(data), filepath.Base(quarantine))
 
 	return c.loadStateBackup()
 }
@@ -285,16 +309,20 @@ func (c *Config) QuarantineState() (string, error) {
 	// overwrite one; it is a reason to leave state.json where it is and say so.
 	for i := 1; fileExists(quarantine); i++ {
 		if i >= quarantineAttempts {
-			return "", fmt.Errorf("cannot quarantine %s: %s and its %d numbered variants all exist",
+			err := fmt.Errorf("cannot quarantine %s: %s and its %d numbered variants all exist",
 				stateFileName, base, quarantineAttempts-1)
+			log.Printf("state: %v", err)
+			return "", err
 		}
 		quarantine = fmt.Sprintf("%s-%d", base, i)
 	}
 
 	if err := os.Rename(path, quarantine); err != nil {
+		log.Printf("state: cannot move %s aside after a failed restore: %v", stateFileName, err)
 		return "", err
 	}
 	syncDir(c.dir)
+	log.Printf("state: layout could not be rebuilt; %s moved aside to %s", stateFileName, filepath.Base(quarantine))
 
 	return quarantine, nil
 }
@@ -308,9 +336,15 @@ func fileExists(path string) bool {
 // itself unparseable.
 func (c *Config) loadStateBackup() string {
 	data, err := os.ReadFile(c.statePath() + bakSuffix)
-	if err != nil || !json.Valid(data) {
+	if err != nil {
+		log.Printf("state: no usable %s either (%v); starting from an empty layout", stateFileName+bakSuffix, err)
 		return ""
 	}
+	if !json.Valid(data) {
+		log.Printf("state: %s does not parse either (%d bytes); starting from an empty layout", stateFileName+bakSuffix, len(data))
+		return ""
+	}
+	log.Printf("state: restored the layout from %s (%d bytes)", stateFileName+bakSuffix, len(data))
 	return string(data)
 }
 

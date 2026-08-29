@@ -8,6 +8,22 @@ export const DEFAULT_SPLIT_RATIO = 0.5;
 export const SPATIAL_NAV_THRESHOLD = 10;
 export const STATE_VERSION = 2;
 
+// PTY output flow control. Every byte xterm writes has to be acknowledged or
+// the backend stops reading the shell, so acks are coalesced rather than
+// skipped: one binding call per 64 KiB written, or per 50ms of quiet, instead
+// of one per chunk (a `cat` of a large file arrives in thousands of them).
+// The window either threshold has to stay inside is the backend's: it pauses
+// at 1 MiB unacknowledged and resumes below 256 KiB.
+export const ACK_FLUSH_BYTES = 64 * 1024;
+export const ACK_FLUSH_MS = 50;
+
+// One file drop becomes one write to the pty, and a pty write blocks until the
+// foreground program reads it — a shell at its prompt does, `vim` mid-edit does
+// not. That is true of any large paste and is not this feature's to fix, but a
+// drop is the one place the app can produce a huge write on its own, so it caps
+// itself: the first this many paths go in and the pane says how many did not.
+export const MAX_DROP_PATHS = 200;
+
 // ── Command Registry ──
 // Single source of truth for every command's name, description, shortcut, and category.
 // Every UI surface (palette, context menu, status bar, hints) reads from here.
@@ -46,6 +62,7 @@ export const CMD = {
   SESSION_STATUS:   cmd('Session Status',     'Show running commands across all panes',   'CMD+I',        'General'),
   COMMAND_PALETTE:  cmd('Command Palette',    'Open command palette',                     'CMD+P',        'General'),
   CLEAR_TERMINAL:   cmd('Clear Terminal',     'Clear the active terminal',                'CMD+L',        'General'),
+  REVEAL_LOGS:      cmd('Reveal Logs',        'Show the app log file in Finder',          '',             'General'),
   CREATE_COMMAND:   cmd('Create Command',     'Create a custom command',                  'CMD+SHIFT+C',  'Commands'),
 
   // AI

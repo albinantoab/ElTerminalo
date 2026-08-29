@@ -1,5 +1,6 @@
 import { Tab } from '../types';
 import { escHtml } from '../utils';
+import { logError } from '../log';
 
 export interface StatusModalCallbacks {
   getTabs(): Tab[];
@@ -121,7 +122,7 @@ export class StatusModal {
       this.cursor = Math.min(prevCursor, Math.max(0, this.entries.length - 1));
       this.render();
     } catch (e) {
-      console.error('Failed to fetch session status:', e);
+      logError('Failed to fetch session statuses for the status modal', e);
     }
   }
 
@@ -210,7 +211,7 @@ export class StatusModal {
         });
       }
     } catch (e) {
-      console.error('Render error:', e);
+      logError('Session status modal failed to render', e);
       this.overlay.innerHTML = '<div class="error">Something went wrong</div>';
     }
   }

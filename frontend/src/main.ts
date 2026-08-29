@@ -8,13 +8,59 @@ import { StateManager } from './state/StateManager';
 import { StatusModal } from './status/StatusModal';
 import { AskAI } from './ai/AskAI';
 import { HistoryModal } from './history/HistoryModal';
-import { escHtml, generateId, waitForLayout, utf8ToBase64, bytesToBase64 } from './utils';
+import { escHtml, generateId, waitForLayout, utf8ToBase64 } from './utils';
 import {
   MAX_TABS, DOUBLE_CLICK_DELAY_MS, MIN_SPLIT_RATIO, MAX_SPLIT_RATIO,
-  DEFAULT_SPLIT_RATIO, SPATIAL_NAV_THRESHOLD, STATE_SAVE_INTERVAL_MS, CMD,
+  DEFAULT_SPLIT_RATIO, SPATIAL_NAV_THRESHOLD, STATE_SAVE_INTERVAL_MS,
+  MAX_DROP_PATHS, CMD,
 } from './constants';
+import { logError, logInfo } from './log';
 import './types/wails.d.ts';
-import type { PtyExitPayload } from './types/wails.d.ts';
+import type { PtyExitPayload, FilesDroppedPayload } from './types/wails.d.ts';
+
+/** Cancel the webview's own drag and drop, from the moment the page exists.
+ *
+ *  WKWebView's default action for a dropped file is to *load* it in the main
+ *  frame: the app is replaced by a directory listing, and a terminal has no
+ *  back button. Nothing else stops that. The app runs with
+ *  `DisableWebViewDrop: false` — deliberately, see main.go — so the webview
+ *  keeps its default handling; Wails v2.11 installs no
+ *  `decidePolicyForNavigationAction` of its own; and the handlers that would
+ *  intercept the drop — with them the whole `--wails-drop-target` CSS opt-in —
+ *  are installed only by the *JavaScript* runtime.OnFileDrop, which this app
+ *  does not call. It subscribes on the Go side instead, and that emitter tests
+ *  no styles and asks no permission. The page's own `preventDefault()` is the
+ *  only guard there is.
+ *
+ *  Which is why this runs at module load rather than from `init()`. `init()`
+ *  is called on DOMContentLoaded and then awaits the AI model download — some
+ *  hundreds of megabytes on a fresh install — long before it reaches anything
+ *  that installs handlers. A folder dropped on the splash while that ran took
+ *  the window with it: the app navigated to `file:///…` and was gone. The two
+ *  listeners below need no app to run. They cancel, and do nothing else; what
+ *  is *done* with a drop is the ElTerminalo instance's business, and it adds
+ *  its own listener for that (see `installWebviewDropHandlers`).
+ *
+ *  Both are capture-phase, so nothing between the document and the drop target
+ *  can stop the event from reaching the one line that matters. */
+function installDropNavigationGuard(): void {
+  // Cancelling dragover is also what makes the page a drop target at all.
+  // Uncancelled, the webview refuses whatever it has no default action of its
+  // own for: a dragged text selection gets a "no" cursor and never produces a
+  // drop event. (A dragged file it accepts unasked — and then navigates to,
+  // which is what the drop handler below exists to stop.)
+  document.addEventListener('dragover', (e: DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  }, true);
+
+  document.addEventListener('drop', (e: DragEvent) => {
+    e.preventDefault();
+  }, true);
+}
+
+// Before DOMContentLoaded, before init(), before the splash's first frame.
+installDropNavigationGuard();
 
 const ICON_CPU =
   '<svg class="status-stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -100,6 +146,26 @@ class ElTerminalo {
   private set layoutRoot(v: SplitNode | null) { if (this.tab) this.tab.layoutRoot = v; }
 
   async init(): Promise<void> {
+    // Drag and drop first — ahead of every await below, and ahead of the very
+    // modules these handlers consult. A drop that lands while init() is still
+    // working (the model download alone can hold it for minutes on a fresh
+    // install, and restoreState() reconnects every saved pane after that) must
+    // still be cancelled, and the guard installed at module load is only half
+    // of that: it stops the navigation, this decides what to do instead.
+    // Both halves are written to do nothing, gracefully, until the rest of the
+    // app exists — see isModalOpen() and handleFilesDropped().
+    this.installWebviewDropHandlers();
+
+    // Native file drops. macOS hands the webview the real filesystem paths, so
+    // the Go side resolves them and reports where the drop landed; nothing is
+    // read, copied or staged here — the paths go straight to the shell, which
+    // is what the user dragged them onto a terminal to do. Subscribed this
+    // early for the same reason: the event fires whether or not there are
+    // panes yet, and it is better answered than missed.
+    window.runtime.EventsOn('files:dropped', (payload?: FilesDroppedPayload) => {
+      this.handleFilesDropped(payload);
+    });
+
     this.container = document.getElementById('pane-container')!;
     this.tabBar = document.getElementById('tab-bar')!;
     this.statusbar = document.getElementById('statusbar')!;
@@ -242,40 +308,187 @@ class ElTerminalo {
       try {
         await this.stateManager.save();
       } catch (e) {
-        console.error('Failed to save state before quit:', e);
+        logError('Failed to save the window layout before quit', e);
       }
       // Also a promise: nothing left to do if it rejects, but an unhandled
       // rejection is not how this handler should end.
       window.go.main.App.ConfirmQuit().catch(() => {});
     });
+  }
 
-    // Handle file drops — read via HTML5 API, save to temp via Go
-    document.addEventListener('dragover', (e) => e.preventDefault(), true);
-    document.addEventListener('drop', async (e) => {
+  /** What the app does with an HTML5 drop, once the module-level guard has
+   *  cancelled it. WKWebView delivers `dragover`/`drop` to the page as well as
+   *  posting the native drop that becomes `files:dropped`, so the same gesture
+   *  arrives twice, and the two halves split by kind:
+   *
+   *  - Files are ignored here. They arrive a second time through the native
+   *    path, which is the only one that knows their real filesystem paths — the
+   *    File objects in this event have names and bytes and no path at all.
+   *  - Text is handled here, because the native path never sees it: a selection
+   *    dragged out of another app, or a link dragged from Safari, is pasted
+   *    into the pane under the pointer.
+   *
+   *  The cost of cancelling everything is that text can no longer be dropped
+   *  into the app's own inputs (the palette's, a wizard's). Nobody drags text
+   *  into a terminal's dialog boxes, and the alternative is an app that can be
+   *  navigated away from by a misplaced file.
+   *
+   *  Installed as init()'s first statement, ahead of the modules and panes it
+   *  consults, so every question it asks about them has to be safe to ask
+   *  before they exist: during startup the splash is what the drop landed on
+   *  and there is no pane behind it yet, so the drop falls off the end of this
+   *  handler having been cancelled and nothing else. */
+  private installWebviewDropHandlers(): void {
+    document.addEventListener('drop', (e: DragEvent) => {
+      // Already cancelled in the capture phase, by the guard installed at
+      // module load. Repeated because this handler must never be the reason a
+      // dropped file replaces the app with a directory listing — not even if
+      // the two ever come to be installed in a different order.
       e.preventDefault();
-      if (!e.dataTransfer?.files?.length) return;
-      // Find which pane the drop landed on
-      const target = e.target as HTMLElement;
-      const ap = this.panes.find(p => p.element.contains(target)) || this.panes[this.activeIndex];
-      if (!ap?.pane.sessionId) return;
-      const paths: string[] = [];
-      for (let i = 0; i < e.dataTransfer.files.length; i++) {
-        const f = e.dataTransfer.files[i];
-        if (!f) continue;
-        try {
-          const buf = await f.arrayBuffer();
-          const b64 = bytesToBase64(new Uint8Array(buf));
-          const path = await window.go.main.App.SaveDroppedFile(f.name, b64);
-          if (path) paths.push(path);
-        } catch { /* skip failed files */ }
-      }
-      // Re-checked: reading the files and staging them took time, and the shell
-      // may have exited in the meantime.
-      if (paths.length > 0 && ap.pane.sessionId) {
-        const escaped = paths.map(p => this.shellEscape(p)).join(' ');
-        window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(escaped + ' ')).catch(() => {});
-      }
-    }, true);
+      const dt = e.dataTransfer;
+      if (!dt) return;
+      // Files belong to the native path, which reports real paths. Both tests
+      // are needed: `files` is empty for a dropped directory in some webviews,
+      // and `types` is what the drag advertised.
+      if (dt.files.length > 0 || dt.types.includes('Files')) return;
+      // A dragged link offers its URL as both; plain text is the one thing
+      // every source provides, and for a link it is the URL — which is what
+      // gets inserted, exactly as iTerm2 does it.
+      const text = (dt.getData('text/plain') || dt.getData('text/uri-list')).trim();
+      if (!text) return;
+      // Same gate as a file drop: the pane under the pointer, nothing if there
+      // isn't one, and nothing at all while a dialog owns the window.
+      if (this.isModalOpen()) return;
+      const target = this.paneAtPoint(e.clientX, e.clientY);
+      if (!target?.pane.sessionId) return;
+      target.pane.pasteText(text);
+    });
+  }
+
+  /** True while something is layered over the panes: the palette, a modal, a
+   *  wizard, an update/confirmation dialog, or the splash. A drop that lands on
+   *  the window now was aimed at what is on top, and the panes are not it.
+   *
+   *  Every `?.` below is load-bearing, in spite of the `!` on the fields it
+   *  reads. The drop handlers are installed as init()'s first act, ahead of the
+   *  modules themselves — so a drop that arrives during startup, or after an
+   *  init() that threw part way through building them, reaches this with some
+   *  of them still undefined. Undefined is "not open": nothing is layered over
+   *  panes that do not exist yet. The alternative is a TypeError thrown inside
+   *  a drop listener, where nobody would ever see it. */
+  private isModalOpen(): boolean {
+    return this.palette?.isOpen()
+      || this.statusModal?.isOpen()
+      || this.askAI?.isOpen()
+      || this.historyModal?.isOpen()
+      || this.wizard?.isOpen()
+      || this.themeWizard?.isOpen()
+      // Covers the update prompt, the model download and the confirm dialogs:
+      // they are built on demand and all carry this class.
+      || document.querySelector('.update-overlay') !== null
+      // And the splash, which is the same thing one layer up: an opaque cover
+      // over the whole window, still there for its minimum display time after
+      // init() has already built the panes behind it. It has to be named
+      // explicitly because paneAtPoint() now falls back to plain geometry,
+      // which sees through anything. The class arrives when it starts fading —
+      // and with it `pointer-events: none`, the app underneath being what the
+      // user is now aiming at.
+      || document.querySelector('#splash:not(.splash-exit)') !== null;
+  }
+
+  /** Insert the dropped paths, shell-escaped, into the pane they landed on. */
+  private handleFilesDropped(payload?: FilesDroppedPayload): void {
+    let paths = Array.isArray(payload?.paths)
+      ? payload.paths.filter(p => typeof p === 'string' && p !== '')
+      : [];
+    if (paths.length === 0) return;
+
+    // A dialog covers the panes but not the whole window, so a drop that misses
+    // it can still hit-test onto a pane behind it — and the splash covers all
+    // of it. The user was dropping onto what they could see; nothing goes into
+    // a shell they can't.
+    if (this.isModalOpen()) {
+      logInfo('File drop ignored: a dialog or the splash is over the panes');
+      return;
+    }
+
+    // This event is subscribed before init() has built anything, so that a drop
+    // during the splash is answered rather than left to the webview. Answered,
+    // at that point, means saying so and stopping: there is no pane to insert
+    // into, and nothing is held back to replay once there is — the user dropped
+    // it on a loading screen.
+    if (this.panes.length === 0) {
+      logInfo('File drop ignored: the app is still starting up');
+      return;
+    }
+
+    // Whichever pane is under the cursor, not whichever is active: dropping on
+    // a background pane is a deliberate act, and it doesn't move the focus.
+    //
+    // No pane under the point — the tab bar, the status bar, the window's own
+    // chrome, the gap between two panes — means there is no pane this was
+    // meant for. Falling
+    // back to the active one would type the paths into whatever is running
+    // there, out of sight of where the user was actually aiming, and into vim
+    // or ssh as readily as into a prompt.
+    const target = this.paneAtPoint(payload?.x, payload?.y);
+    if (!target) {
+      logInfo('File drop ignored: it did not land on a pane');
+      return;
+    }
+    // A pane whose shell has exited has nowhere to put them.
+    if (!target.pane.sessionId) return;
+
+    // The whole drop goes to the pty in one write, and that write blocks until
+    // the foreground program reads it. Hundreds of paths is also past what any
+    // command line wants, so the rest are left out — and said out loud, before
+    // the paths themselves, rather than silently dropped.
+    const total = paths.length;
+    if (total > MAX_DROP_PATHS) {
+      paths = paths.slice(0, MAX_DROP_PATHS);
+      logInfo(`File drop capped at ${MAX_DROP_PATHS} paths; ${total - MAX_DROP_PATHS} skipped`);
+      target.pane.writeNotice(
+        `[Dropped ${total} items; only the first ${MAX_DROP_PATHS} were inserted]`,
+      );
+    }
+
+    const escaped = paths.map(p => this.shellEscape(p)).join(' ');
+    // Trailing space so the next path — or the rest of the command — doesn't
+    // run into this one.
+    target.pane.sendText(escaped + ' ');
+  }
+
+  /** The pane under a window coordinate, or null when the point isn't on one.
+   *  Only the visible tab's panes are in the DOM, which is exactly the set a
+   *  drop can land on.
+   *
+   *  Two passes, because the topmost element at a point is not always the pane
+   *  the user was aiming at. Smart-render badges and the panel they open are
+   *  children of <body>, `position: fixed` at `z-index: 500` — they have to be,
+   *  to sit over a pane whose own box would clip them — so a drop aimed at the
+   *  pane behind one hit-tests onto the badge, whose `.closest('.pane-leaf')`
+   *  is null, and used to be swallowed. The geometric pass is for exactly that:
+   *  the leaf whose rectangle contains the point, whatever is painted on top.
+   *
+   *  There is deliberately no third pass onto the active pane. A point on the
+   *  tab bar, the status bar, the gap between two panes, or off every leaf
+   *  belongs to no pane, and typing the paths into whichever shell happens to
+   *  be focused — out of sight of where the user aimed, into vim or ssh as
+   *  readily as into a prompt — is worse than doing nothing. Anything layered
+   *  *over* the panes is out of scope here too, and stays that way: both
+   *  callers run the isModalOpen() gate before asking. */
+  private paneAtPoint(x?: number, y?: number): PaneInfo | null {
+    if (typeof x !== 'number' || typeof y !== 'number') return null;
+    const leaf = document.elementFromPoint(x, y)?.closest('.pane-leaf');
+    if (leaf) {
+      const hit = this.panes.find(p => p.element === leaf);
+      if (hit) return hit;
+    }
+    for (const p of this.panes) {
+      const r = p.element.getBoundingClientRect();
+      if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return p;
+    }
+    return null;
   }
 
   private destroy(): void {
@@ -379,7 +592,7 @@ class ElTerminalo {
       }
 
     } catch (e) {
-      console.error('Model check failed:', e);
+      logError('AI model download check failed during startup', e);
     }
   }
 
@@ -422,12 +635,15 @@ class ElTerminalo {
     this.renderLayout();
     await waitForLayout();
     pane.pane.fit();
+    // This tab is now the visible one, so its pane takes a GPU context and the
+    // tab that just went off screen gives its own back.
+    this.syncWebgl();
     // A shell that won't start leaves a pane that says so and retries on Enter,
     // rather than rejecting out of here — this also runs during init().
     try {
       await pane.pane.connect();
     } catch (e) {
-      console.error('Failed to start shell for new tab:', e);
+      logError(`Failed to start shell for new tab "${tabName}"`, e);
       pane.pane.showStartFailure(e);
     }
     this.setActive(0);
@@ -469,15 +685,40 @@ class ElTerminalo {
 
   private switchToTab(index: number): void {
     if (index < 0 || index >= this.tabs.length) return;
+    const outgoing = this.tab;
     this.activeTabIndex = index;
+    // Release the outgoing tab's GPU contexts *before* the incoming tab asks
+    // for its own. Browsers cap how many WebGL contexts are alive at once and
+    // silently drop the oldest to make room; overlapping the two tabs would
+    // spend that budget blanking a pane the user is about to look at.
+    if (outgoing && outgoing !== this.tab) {
+      for (const p of outgoing.panes) p.pane.disableWebgl();
+    }
     this.renderTabBar();
     this.renderLayout();
     requestAnimationFrame(() => {
       this.fitAll();
+      // After the fit: the renderer sizes its canvas from the terminal's
+      // dimensions, so a context taken before the panes have their final size
+      // would only have to be resized again.
+      this.syncWebgl();
       if (this.panes.length > 0) {
         this.setActive(this.activeIndex);
       }
     });
+  }
+
+  /** Only the tab on screen holds WebGL contexts. Called after every render
+   *  that changes which panes are visible; both halves are idempotent, so it
+   *  is cheap to call whenever in doubt. */
+  private syncWebgl(): void {
+    for (const tab of this.tabs) {
+      const visible = tab === this.tab;
+      for (const p of tab.panes) {
+        if (visible) p.pane.enableWebgl();
+        else p.pane.disableWebgl();
+      }
+    }
   }
 
   private async renameTab(index: number, newName: string): Promise<void> {
@@ -582,6 +823,7 @@ class ElTerminalo {
         this.renderLayout();
         await waitForLayout();
         for (const p of tab.panes) p.pane.fit();
+        this.syncWebgl();
         return true;
       }
 
@@ -610,12 +852,16 @@ class ElTerminalo {
       this.renderLayout();
       await waitForLayout();
       for (const p of this.tab.panes) p.pane.fit();
+      // Every restored tab has its panes, but only the active one is on screen
+      // and only its panes may hold a GPU context — a seventeen-pane layout
+      // would otherwise ask for seventeen and lose most of them.
+      this.syncWebgl();
 
       // Deliberately no save here: nothing changed from the user's point of
       // view, and the 30s autosave starts once init() is past this.
       return true;
     } catch (e) {
-      console.error('Failed to restore state:', e);
+      logError('Failed to restore the saved window layout', e);
       // Leave nothing half-built behind — init() falls back to a fresh tab.
       for (const t of this.tabs) for (const p of t.panes) p.pane.dispose();
       this.tabs = [];
@@ -628,7 +874,7 @@ class ElTerminalo {
       try {
         this.quarantinedStatePath = await window.go.main.App.QuarantineAppState();
       } catch (qe) {
-        console.error('Failed to quarantine unreadable state:', qe);
+        logError('Failed to quarantine the unreadable state file', qe);
       }
       return false;
     } finally {
@@ -663,7 +909,7 @@ class ElTerminalo {
     try {
       await pane.pane.connect(saved?.cwd || '');
     } catch (e) {
-      console.error('Failed to start shell for restored pane:', e);
+      logError(`Failed to start shell for restored pane in ${saved?.cwd || 'the default directory'}`, e);
       pane.pane.showStartFailure(e);
     }
     return { type: 'leaf', paneInfo: pane };
@@ -751,10 +997,12 @@ class ElTerminalo {
     this.renderLayout();
     await waitForLayout();
     this.fitAll();
+    // The split added a visible pane, which needs its own context.
+    this.syncWebgl();
     try {
       await newPane.pane.connect();
     } catch (e) {
-      console.error('Failed to start shell for new pane:', e);
+      logError(`Failed to start shell for new pane ${newPane.id}`, e);
       newPane.pane.showStartFailure(e);
     }
     this.setActive(this.panes.indexOf(newPane));
@@ -1017,6 +1265,9 @@ class ElTerminalo {
 
   private async promptUpdate(): Promise<void> {
     if (!this.updateInfo?.available) return;
+    // Captured now: a later check can clear updateInfo out from under the
+    // button's handler.
+    const latestVersion = this.updateInfo.latestVersion;
 
     // Show confirmation overlay
     const overlay = document.createElement('div');
@@ -1044,7 +1295,7 @@ class ElTerminalo {
       } catch (e) {
         btn.textContent = 'Failed — retry';
         btn.disabled = false;
-        console.error('Update failed:', e);
+        logError(`Failed to apply update v${latestVersion}`, e);
       }
     });
   }
@@ -1085,6 +1336,7 @@ class ElTerminalo {
       { name: CMD.SESSION_STATUS.name, desc: CMD.SESSION_STATUS.desc, category: CMD.SESSION_STATUS.category, shortcutDisplay: CMD.SESSION_STATUS.shortcut, action: () => { this.closePaletteIfOpen(); this.statusModal.show(); } },
       { name: CMD.COMMAND_PALETTE.name, desc: CMD.COMMAND_PALETTE.desc, category: CMD.COMMAND_PALETTE.category, shortcutDisplay: CMD.COMMAND_PALETTE.shortcut, action: () => this.palette.show() },
       { name: CMD.CLEAR_TERMINAL.name, desc: CMD.CLEAR_TERMINAL.desc, category: CMD.CLEAR_TERMINAL.category, shortcutDisplay: CMD.CLEAR_TERMINAL.shortcut, action: () => this.clearActiveTerminal() },
+      { name: CMD.REVEAL_LOGS.name, desc: CMD.REVEAL_LOGS.desc, category: CMD.REVEAL_LOGS.category, action: () => { this.closePaletteIfOpen(); this.revealLogs(); } },
       { name: CMD.COPY_LAST_OUTPUT.name, desc: CMD.COPY_LAST_OUTPUT.desc, category: CMD.COPY_LAST_OUTPUT.category, action: () => { const output = this.panes[this.activeIndex]?.pane.shellIntegration.getLastCommandOutput(); if (output) navigator.clipboard.writeText(output); this.closePaletteIfOpen(); } },
       { name: CMD.CREATE_COMMAND.name, desc: CMD.CREATE_COMMAND.desc, category: CMD.CREATE_COMMAND.category, shortcutDisplay: CMD.CREATE_COMMAND.shortcut, action: () => { this.palette.hide(); const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || ''; this.wizard.show(input); } },
       ...this.themes.map(t => ({
@@ -1133,7 +1385,7 @@ class ElTerminalo {
         }
       }
     } catch (e) {
-      console.error('Failed to delete theme:', e);
+      logError(`Failed to delete theme "${themeName}"`, e);
     }
   }
 
@@ -1162,6 +1414,14 @@ class ElTerminalo {
 
   private closePaletteIfOpen(): void {
     if (this.palette.isOpen()) this.palette.hide();
+  }
+
+  /** Show the log file in Finder, so a user can attach it to a bug report
+   *  without having to be told where the app keeps it. */
+  private revealLogs(): void {
+    window.go.main.App.RevealLogs().catch((e) => {
+      logError('Failed to reveal the log file in Finder', e);
+    });
   }
 
   private clearActiveTerminal(): void {
@@ -1236,7 +1496,8 @@ class ElTerminalo {
       if (ap.pane.sessionId) {
         window.go.main.App.WriteToSession(ap.pane.sessionId, utf8ToBase64(`# AI failed: ${query}`)).catch(() => {});
       }
-      console.error('AI generation failed:', err);
+      // The prompt itself is the user's text and stays out of the log file.
+      logError(`AI command generation failed for session ${ap.pane.sessionId || '(exited)'}`, err);
     }
 
     this.setAILoading(false);

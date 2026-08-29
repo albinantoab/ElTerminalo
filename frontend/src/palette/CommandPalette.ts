@@ -1,6 +1,7 @@
 import { PaletteCommand, CustomCommand } from '../types';
 import { utf8ToBase64, escHtml } from '../utils';
 import { CMD } from '../constants';
+import { logError } from '../log';
 
 export interface PaletteCallbacks {
   getBuiltInCommands(): PaletteCommand[];
@@ -197,7 +198,7 @@ export class CommandPalette {
 
       this.overlay.querySelector('.palette-item.selected')?.scrollIntoView({ block: 'nearest' });
     } catch (e) {
-      console.error('Render error:', e);
+      logError('Command palette failed to render', e);
       this.overlay.innerHTML = '<div class="error">Something went wrong</div>';
     }
   }
@@ -208,7 +209,7 @@ export class CommandPalette {
       this.render();
       (this.overlay.querySelector('.palette-input') as HTMLInputElement)?.focus();
     } catch (e) {
-      console.error('Failed to delete theme:', e);
+      logError(`Failed to delete theme "${cmd.name}"`, e);
     }
   }
 
@@ -220,7 +221,7 @@ export class CommandPalette {
       this.render();
       (this.overlay.querySelector('.palette-input') as HTMLInputElement)?.focus();
     } catch (e) {
-      console.error('Failed to delete command:', e);
+      logError(`Failed to delete command "${cmd.name}"`, e);
     }
   }
 }

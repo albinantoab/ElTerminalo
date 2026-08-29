@@ -7,12 +7,22 @@ export interface WailsApp {
   // return nothing: a failure here rejects, it does not throw.
   ResizeSession(sessionID: string, cols: number, rows: number): Promise<void>;
   CloseSession(sessionID: string): Promise<void>;
-  /** True while the backend still holds this session. The session is dropped
-   *  from the backend's map *before* `pty:exit:<id>` is emitted, so the answer
-   *  is unambiguous for a caller that has already subscribed: `true` means the
-   *  exit event is still to come, `false` means it has already been emitted —
-   *  possibly before there was a listener for it. */
-  SessionExists(sessionID: string): Promise<boolean>;
+  /** Claim a session's output, and report whether it is still there. Call it
+   *  immediately after subscribing to `pty:output:<id>` and `pty:exit:<id>`:
+   *  the backend flushes whatever the shell wrote before those listeners
+   *  existed, so nothing printed during startup is lost.
+   *
+   *  The session is dropped from the backend's map *before* `pty:exit:<id>` is
+   *  emitted, so the return value is unambiguous for a caller that has already
+   *  subscribed: `true` means the exit event is still to come, `false` means it
+   *  has already been emitted — possibly before there was a listener for it. */
+  AttachSession(sessionID: string): Promise<boolean>;
+  /** Acknowledge `n` raw (decoded) bytes of this session's output, once xterm
+   *  has finished writing them. This is the frontend half of the PTY's flow
+   *  control: the backend stops reading the pty at 1 MiB unacknowledged and
+   *  resumes below 256 KiB, so every byte handed to the terminal must be acked
+   *  or the shell stalls. Unknown session ids are ignored. */
+  AckOutput(sessionID: string, n: number): Promise<void>;
   GetSessionCWD(sessionID: string): Promise<string>;
   GetAllSessionCWDs(): Promise<Record<string, string>>;
   GetThemes(): Promise<ThemeDTO[]>;
@@ -29,8 +39,12 @@ export interface WailsApp {
   UpdateCommand(scope: string, oldName: string, newName: string, newCommand: string, newDescription: string, newShortcut: string, cwd: string): Promise<void>;
   SaveTheme(name: string, background: string, foreground: string, accent: string, accentDim: string, border: string, borderActive: string, statusBg: string, statusFg: string, cursorColor: string, selectionBg: string, black: string, red: string, green: string, yellow: string, blue: string, magenta: string, cyan: string, white: string, brightBlack: string, brightRed: string, brightGreen: string, brightYellow: string, brightBlue: string, brightMagenta: string, brightCyan: string, brightWhite: string): Promise<void>;
   DeleteTheme(name: string): Promise<void>;
-  SaveDroppedFile(fileName: string, dataBase64: string): Promise<string>;
   ConfirmQuit(): Promise<void>;
+  /** Append one line to the app's log file. Fire-and-forget: see `log.ts`, the
+   *  only place that should call this. */
+  LogMessage(level: 'info' | 'warn' | 'error', message: string): Promise<void>;
+  /** Show the log file in Finder. */
+  RevealLogs(): Promise<void>;
   GetAllSessionStatuses(): Promise<Record<string, SessionStatusDTO>>;
   GetVersion(): Promise<string>;
   GetHostname(): Promise<string>;
@@ -59,6 +73,17 @@ export interface WailsApp {
 export interface PtyExitPayload {
   exitCode: number;
   signal: string;
+}
+
+/** Payload of the `files:dropped` event: Wails' native file drop, already
+ *  resolved to absolute paths on the Go side. `x`/`y` are the drop point in the
+ *  window's CSS pixel space — the macOS webview reports the drag location in
+ *  view points with the Y axis flipped to match the web's — which is exactly
+ *  what `document.elementFromPoint` expects. */
+export interface FilesDroppedPayload {
+  x: number;
+  y: number;
+  paths: string[];
 }
 
 export interface SystemStats {

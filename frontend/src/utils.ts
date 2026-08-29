@@ -28,9 +28,22 @@ export function stripAnsi(text: string): string {
     .replace(/\x1b[=>]/g, '');                // Keypad modes
 }
 
-/** Base64-encode raw bytes. */
-export function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
+// `Uint8Array.fromBase64` is a WebKit-shipped proposal that TypeScript's ES2020
+// lib doesn't know about yet. Reached through the constructor so `this` is the
+// intrinsic it expects.
+type Base64Decoder = { fromBase64?(b64: string): Uint8Array };
+const U8 = Uint8Array as Uint8ArrayConstructor & Base64Decoder;
+
+/** Decode base64 into raw bytes.
+ *
+ *  This is the hot path: every chunk the shell prints comes through here, so it
+ *  writes into a preallocated array rather than paying `Uint8Array.from`'s
+ *  closure call per byte. The native decoder is used where the webview has it. */
+export function base64ToBytes(b64: string): Uint8Array {
+  if (U8.fromBase64) return U8.fromBase64(b64);
+  const binary = atob(b64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }

@@ -1,5 +1,6 @@
 import { Tab, SavedState, SavedSplitNode, SavedTab, SplitNode } from '../types';
 import { STATE_VERSION } from '../constants';
+import { logError } from '../log';
 
 export interface StateCallbacks {
   getTabs(): Tab[];
@@ -83,7 +84,7 @@ export class StateManager {
       };
       await window.go.main.App.SaveAppState(JSON.stringify(state));
     } catch (e) {
-      console.error('Failed to save state:', e);
+      logError('Failed to save the window layout', e);
     }
   }
 
@@ -94,7 +95,7 @@ export class StateManager {
       const state: SavedState = JSON.parse(json);
       return state;
     } catch (e) {
-      console.error('Failed to load state:', e);
+      logError('Failed to load the saved window layout', e);
       return null;
     }
   }
