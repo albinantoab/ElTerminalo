@@ -28,6 +28,7 @@ import (
 	"github.com/albinanto/elterminalo/internal/stats"
 	"github.com/albinanto/elterminalo/internal/theme"
 	"github.com/albinanto/elterminalo/internal/updater"
+	"github.com/albinanto/elterminalo/internal/workspace"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -72,6 +73,16 @@ const menuActionEvent = "menu:action"
 // {"name": "<theme name>"}. It refetches the list and switches to that theme.
 const themesChangedEvent = "themes:changed"
 
+// notificationActivatedEvent tells the frontend the user clicked one of our
+// native notifications, as {"paneKey": "<whatever was passed to Notify>"}. The
+// key is opaque to Go: the frontend chose it when it asked for the
+// notification, and it is the only thing that says which pane to focus.
+const notificationActivatedEvent = "notification:activated"
+
+// transcriptsDirName is the subdirectory of the config directory that recorded
+// pane output goes into, one directory per day.
+const transcriptsDirName = "transcripts"
+
 // issuesURL is where Help › Report an Issue goes.
 const issuesURL = "https://github.com/albinantoab/ElTerminalo/issues"
 
@@ -84,6 +95,30 @@ const maxWindowTitleBytes = 256
 // circulation is a few tens of kilobytes; this is only here so that picking a
 // disk image in the file dialog cannot read it all into memory.
 const maxSchemeBytes = 4 << 20
+
+// Bounds on what a notification may carry. Like a window title, all three come
+// from the terminal in the end — OSC 9 and OSC 777 are sequences any program
+// the user runs can print — so none of them is trusted to be short or to be one
+// line. macOS truncates a banner to a couple of lines anyway; these numbers only
+// keep an unbounded string from being handed to AppKit.
+const (
+	maxNotificationTitleBytes = 128
+	maxNotificationBodyBytes  = 512
+	// maxPaneKeyBytes bounds the round-tripped key. Nothing reads it but the
+	// frontend, and it is stored in the notification's userInfo, which the
+	// system persists.
+	maxPaneKeyBytes = 128
+)
+
+// maxDockBadgeRunes bounds the Dock tile's badge. The badge is a small red
+// bubble that holds a number or a couple of characters; anything longer is
+// ellipsised by AppKit into something unreadable.
+const maxDockBadgeRunes = 8
+
+// transcriptIDChars is how much of a session id goes into a transcript's
+// filename. Session ids are UUIDs, so eight characters name the pane uniquely
+// among the handful that are open while keeping the name readable.
+const transcriptIDChars = 8
 
 type App struct {
 	ctx    context.Context
@@ -157,6 +192,15 @@ func (a *App) startup(ctx context.Context) {
 	llm.CleanStaleFiles(a.cfg.Dir())
 
 	a.registerFileDrop(ctx)
+
+	// Native notifications. The handler is registered before the request goes
+	// out so that a click can never arrive with nowhere to go, and
+	// InitNotifications returns immediately — the permission prompt it may put
+	// on screen is answered by a human, and the answer comes back through the
+	// package's own callback some seconds or minutes later. Until then
+	// NotificationsReady reports false, which is the truth.
+	macos.OnNotificationActivated(a.notificationActivated)
+	macos.InitNotifications()
 
 	// One line for what the user's config.json actually resolved to, and one
 	// per key we had to repair. Without it, "my font size does nothing" is
@@ -789,6 +833,105 @@ func (a *App) Bell() {
 	}
 }
 
+// notifyLog bounds how many log lines a burst of notifications can produce.
+//
+// It is the same hazard the bell limiter exists for and the same bucket: a
+// notification is asked for by the frontend when it sees OSC 9 or OSC 777, and
+// those are sequences any program the user runs can print as fast as it likes.
+// Only the *log* is limited here — never the notification itself, because the
+// binding's contract is that false means "unavailable or unauthorized" and
+// nothing else. Its attention result is unused.
+var notifyLog = newBellLimiter(bellBurst, bellRatePerSec, bellAttentionGap)
+
+// logNotification writes one rate-limited line about a notification.
+func logNotification(format string, args ...any) {
+	allowed, _, dropped := notifyLog.take(bellClock())
+	if dropped > 0 {
+		log.Printf("notification: %d further line(s) about notifications were suppressed (rate limited)", dropped)
+	}
+	if allowed {
+		log.Printf(format, args...)
+	}
+}
+
+// Notify shows a native notification and reports whether it was posted.
+//
+// False means the notification will not reach the user: either this process
+// cannot use notifications at all (an unbundled build — see internal/macos) or
+// the user has not granted permission. The frontend uses that to fall back to
+// its own in-window indication rather than silently doing nothing.
+//
+// paneKey is opaque here and in the macos package. Whatever the frontend passes
+// comes back to it on notificationActivatedEvent when the user clicks the
+// notification, and it is the only thing that says which pane to focus.
+//
+// Never blocks: delivery happens on the main queue after this returns.
+func (a *App) Notify(title, body, paneKey string) bool {
+	title = sanitizeNotificationText(title, maxNotificationTitleBytes)
+	body = sanitizeNotificationText(body, maxNotificationBodyBytes)
+	paneKey = truncateBytes(paneKey, maxPaneKeyBytes)
+
+	if title == "" && body == "" {
+		// A banner with nothing in it is worse than no banner: it appears, says
+		// nothing, and cannot be explained afterwards.
+		logNotification("notification: suppressed, it had no text after sanitising")
+		return false
+	}
+	if title == "" {
+		title = appTitle
+	}
+
+	if !macos.Notify(title, body, paneKey) {
+		logNotification("notification: %q suppressed; notifications are unavailable or not authorized", title)
+		return false
+	}
+	logNotification("notification: posted %q (paneKey=%q)", title, paneKey)
+	return true
+}
+
+// NotificationsReady reports whether Notify would actually reach the user —
+// notifications are usable in this process and the user has said yes.
+//
+// The frontend asks before offering "notify me when this finishes", so that the
+// offer is not made in a build or a state where it cannot be kept.
+func (a *App) NotificationsReady() bool {
+	return macos.NotificationsReady()
+}
+
+// SetDockBadge puts a badge on the app's Dock tile; an empty label clears it.
+//
+// The frontend uses it for the number of panes wanting attention, which is the
+// one piece of state worth showing to someone who has switched to another app.
+// Not logged: it changes as often as a command finishes, and a line per change
+// would bury everything else.
+func (a *App) SetDockBadge(label string) {
+	macos.SetDockBadge(sanitizeBadgeLabel(label))
+}
+
+// notificationActivated brings the window forward and tells the frontend which
+// pane a clicked notification was about.
+//
+// It runs on its own goroutine — see macos.OnNotificationActivated — and that
+// is what makes the Wails runtime calls below safe from here: each of them hops
+// to the main queue, and the AppKit delegate thread the click actually arrived
+// on is the one that would have had to drain it.
+func (a *App) notificationActivated(paneKey string) {
+	if a.ctx == nil {
+		// Only reachable from a notification delivered before the window
+		// existed, which this app never sends; EventsEmit on a nil context
+		// panics, and a panic here would take the app down.
+		log.Printf("notification: clicked (paneKey=%q) before there was a window", paneKey)
+		return
+	}
+	// Unminimise before Show: a window sitting in the Dock is not brought back
+	// by makeKeyAndOrderFront alone, and clicking a notification is a request to
+	// look at something.
+	wailsRuntime.WindowUnminimise(a.ctx)
+	wailsRuntime.WindowShow(a.ctx)
+	log.Printf("notification: clicked (paneKey=%q); window brought forward", paneKey)
+	wailsRuntime.EventsEmit(a.ctx, notificationActivatedEvent, map[string]string{"paneKey": paneKey})
+}
+
 // ImportColorScheme asks the user for an iTerm2 .itermcolors or a Ghostty theme
 // file, converts it to a theme, saves it, and returns the theme's name.
 //
@@ -911,35 +1054,98 @@ func (a *App) openIssues() {
 	wailsRuntime.BrowserOpenURL(a.ctx, issuesURL)
 }
 
-// sanitizeWindowTitle makes an arbitrary terminal-supplied string safe to put
-// in the title bar: one line, bounded, and free of the characters that reorder
-// or hide what is around them.
+// stripUnsafeRunes drops the character classes that let a string reorder or
+// hide what is printed around it, plus every control character.
 //
-// The classes dropped are the same ones logging.sanitize drops, and for the
-// same reason: U+202E and its neighbours reverse the rendering of everything
-// after them, so a program that sets its own title could otherwise make the
-// window claim to be something it is not.
-func sanitizeWindowTitle(title string) string {
+// The classes are the same ones logging.sanitize drops, and for the same
+// reason: U+202E and its neighbours reverse the rendering of everything after
+// them, so a program that sets its own title — or asks for a notification —
+// could otherwise make the window or the banner claim to be something it is
+// not.
+func stripUnsafeRunes(s string) string {
 	var b strings.Builder
-	b.Grow(len(title))
-	for _, r := range title {
+	b.Grow(len(s))
+	for _, r := range s {
 		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			continue
 		}
 		b.WriteRune(r)
 	}
+	return b.String()
+}
 
-	out := strings.TrimSpace(b.String())
+// truncateBytes caps s at max bytes without ever splitting a rune — a tail cut
+// mid-sequence renders as a replacement character.
+func truncateBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// sanitizeWindowTitle makes an arbitrary terminal-supplied string safe to put
+// in the title bar: one line, bounded, and free of the characters that reorder
+// or hide what is around them. An empty result restores the app's own name
+// rather than leaving a blank title bar.
+func sanitizeWindowTitle(title string) string {
+	out := strings.TrimSpace(stripUnsafeRunes(title))
 	if len(out) > maxWindowTitleBytes {
-		cut := maxWindowTitleBytes
-		// Never split a rune: the tail would render as a replacement character.
-		for cut > 0 && !utf8.RuneStart(out[cut]) {
-			cut--
-		}
-		out = strings.TrimSpace(out[:cut])
+		out = strings.TrimSpace(truncateBytes(out, maxWindowTitleBytes))
 	}
 	if out == "" {
 		return appTitle
+	}
+	return out
+}
+
+// sanitizeNotificationText bounds one field of a notification. Unlike a window
+// title an empty result is left empty — Notify decides what an empty title or
+// body means, and a body that falls back to the app's name would be worse than
+// no body at all.
+func sanitizeNotificationText(s string, maxBytes int) string {
+	out := strings.TrimSpace(stripUnsafeRunes(s))
+	if len(out) > maxBytes {
+		out = strings.TrimSpace(truncateBytes(out, maxBytes))
+	}
+	return out
+}
+
+// sanitizeBadgeLabel reduces a label to something that fits in a Dock tile
+// badge: one line, no character that can reorder what is around it, and at most
+// maxDockBadgeRunes runes. It is normally a small number.
+//
+// It cannot just call stripUnsafeRunes: a newline is a control character, so
+// "two\nlines" would come out as "twolines" with the two halves jammed
+// together. Whitespace is folded to a single space first, and only then is the
+// rest dropped.
+func sanitizeBadgeLabel(label string) string {
+	var b strings.Builder
+	b.Grow(len(label))
+	for _, r := range label {
+		switch {
+		case unicode.IsSpace(r):
+			b.WriteByte(' ')
+		case unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
+			// The classes stripUnsafeRunes drops, for the same reason.
+		default:
+			b.WriteRune(r)
+		}
+	}
+
+	out := strings.Join(strings.Fields(b.String()), " ")
+	if utf8.RuneCountInString(out) <= maxDockBadgeRunes {
+		return out
+	}
+	count := 0
+	for i := range out {
+		if count == maxDockBadgeRunes {
+			return strings.TrimSpace(out[:i])
+		}
+		count++
 	}
 	return out
 }
@@ -1368,4 +1574,357 @@ func (a *App) ClearHistory() error {
 		return nil
 	}
 	return a.historyStore.Clear()
+}
+
+// StartTranscript begins recording a pane's output to a file and returns the
+// path it is writing to.
+//
+// The path is chosen here rather than by the caller, for two reasons. The
+// webview must not be able to name a file the backend then opens for writing;
+// and a transcript is only useful if it can be found again, which means one
+// predictable place — <config>/transcripts/<date>/<time>-<session>.log — rather
+// than wherever the pane's shell happened to be.
+//
+// What lands in the file is the raw stream, escape sequences and all; see the
+// README. That is the point of it — a transcript that had been stripped of
+// colour and cursor motion would no longer be a record of what the pane did.
+//
+// A recording does not always end because somebody asked it to: it stops itself
+// at 256 MiB, and it gives up if a write fails. The frontend hears about both on
+// ptymanager.TranscriptStoppedEvent ("transcript:stopped"), carrying
+// {sessionID, path, reason} with reason "cap" or "error". Without listening for
+// it a pane's recording indicator would keep pulsing over a file that stopped
+// growing, because TranscriptPath then reports "" — which is also what a pane
+// that never recorded reports.
+func (a *App) StartTranscript(sessionID string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("a transcript needs a session")
+	}
+
+	root := filepath.Join(a.cfg.Dir(), transcriptsDirName)
+	now := time.Now()
+	dir := filepath.Join(root, now.Format("2006-01-02"))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("transcript: cannot create %q: %v", dir, err)
+		return "", fmt.Errorf("cannot create the transcripts folder: %w", err)
+	}
+	// MkdirAll only applies its mode to directories it actually creates, so a
+	// transcripts/ left at 0755 by an older build keeps it forever — and these
+	// files hold everything a pane printed. Best-effort, as in logging.Init: a
+	// directory we cannot chmod is still one we can record into.
+	if err := os.Chmod(root, 0o700); err != nil {
+		log.Printf("transcript: could not tighten the mode of %q: %v", root, err)
+	}
+
+	path := filepath.Join(dir, fmt.Sprintf("%s-%s.log", now.Format("150405"), shortSessionID(sessionID)))
+	if err := a.ptyMgr.StartTranscript(sessionID, path); err != nil {
+		log.Printf("transcript: could not start recording %q to %q: %v", sessionID, path, err)
+		return "", err
+	}
+	log.Printf("transcript: recording %q to %q", sessionID, path)
+	return path, nil
+}
+
+// StopTranscript stops recording a pane's output.
+func (a *App) StopTranscript(sessionID string) error {
+	// Read before the stop: afterwards the manager reports "" and the log line
+	// could not say which file was just finished.
+	path := a.ptyMgr.TranscriptPath(sessionID)
+	if err := a.ptyMgr.StopTranscript(sessionID); err != nil {
+		log.Printf("transcript: could not stop recording %q: %v", sessionID, err)
+		return err
+	}
+	log.Printf("transcript: stopped recording %q (%q)", sessionID, path)
+	return nil
+}
+
+// TranscriptPath returns the file a pane is being recorded to, or "" when it is
+// not being recorded. The frontend calls it to render the menu item's state.
+func (a *App) TranscriptPath(sessionID string) string {
+	return a.ptyMgr.TranscriptPath(sessionID)
+}
+
+// shortSessionID reduces a session id to the leading characters that go into a
+// transcript's filename, with anything that is not plainly filename-safe
+// replaced.
+//
+// Session ids are UUIDs the manager generated, so in practice this only ever
+// takes the first eight hex characters — but the id arrives from the webview,
+// and it is being joined into a path.
+func shortSessionID(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		if b.Len() >= transcriptIDChars {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "session"
+	}
+	return b.String()
+}
+
+// RevealPath shows a file or folder in Finder, with it selected.
+//
+// Absolute paths only, and it has to exist: `open` treats a leading "-" as a
+// flag, and the string arrives from the webview. Failures are logged rather
+// than returned — this is behind a menu item, and there is nothing the caller
+// could do with the error.
+func (a *App) RevealPath(path string) {
+	if path == "" {
+		return
+	}
+	if !filepath.IsAbs(path) {
+		log.Printf("reveal: %q is not an absolute path", path)
+		return
+	}
+	// Lstat, not Stat: a symlink whose target is gone is still a thing Finder
+	// can show.
+	if _, err := os.Lstat(path); err != nil {
+		log.Printf("reveal: %q is not there (%v)", path, err)
+		return
+	}
+	if err := startAndReap(exec.Command(updater.OpenPath, "-R", path)); err != nil {
+		log.Printf("reveal: could not reveal %q: %v", path, err)
+	}
+}
+
+// The two editors OpenPath falls back on when the user has not named one.
+//
+// Visual Studio Code first because it opens a *folder*, which is what the
+// palette's "Open Folder in Editor" always hands over; TextEdit only after it,
+// and only for a file, because it declares no folder document type and answers
+// a directory with an error sheet of its own.
+const (
+	preferredEditorApp = "Visual Studio Code"
+	// fileEditorApp is the one editor macOS is guaranteed to have.
+	fileEditorApp = "TextEdit"
+)
+
+// appSearchDirs lists where a named application bundle is looked for, most
+// specific first. A var so a test can point it somewhere of its own.
+//
+// This is a deliberate stand-in for asking LaunchServices. `open -a <name>`
+// would resolve a bundle anywhere on the disk, but it only answers by exiting
+// non-zero *after* the fact — so a chain built on it would have to run up to
+// three subprocesses and wait for each, on a Wails binding the palette is
+// awaiting. Looking on the disk answers the same question before anything is
+// launched, at the cost of not finding an editor installed somewhere unusual;
+// such a user can name it in $VISUAL by full path.
+var appSearchDirs = func() []string {
+	dirs := make([]string, 0, 5)
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		dirs = append(dirs, filepath.Join(home, "Applications"))
+	}
+	return append(dirs,
+		"/Applications",
+		"/Applications/Utilities",
+		"/System/Applications",
+		"/System/Applications/Utilities",
+	)
+}
+
+// findAppBundle resolves an application name — "Zed", "Zed.app", or a full path
+// to a bundle — to the bundle on disk, or "" when there is none.
+func findAppBundle(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if strings.HasPrefix(name, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			name = filepath.Join(home, name[2:])
+		}
+	}
+	// A bundle is a directory. Anything else with the name — a symlink to one is
+	// still fine, which is why this is Stat rather than Lstat — is not one.
+	isBundle := func(p string) bool {
+		info, err := os.Stat(p)
+		return err == nil && info.IsDir()
+	}
+
+	if filepath.IsAbs(name) {
+		if strings.EqualFold(filepath.Ext(name), ".app") && isBundle(name) {
+			return name
+		}
+		// An absolute path that is not a bundle: a terminal editor named in full,
+		// like /opt/homebrew/bin/nvim. `open -a` cannot run one.
+		return ""
+	}
+
+	base := name
+	if !strings.EqualFold(filepath.Ext(base), ".app") {
+		base += ".app"
+	}
+	// Reject a name that would climb out of the search directories; $EDITOR is
+	// the user's own, but it is still a string being joined into a path.
+	if strings.ContainsRune(base, filepath.Separator) {
+		return ""
+	}
+	for _, dir := range appSearchDirs() {
+		if candidate := filepath.Join(dir, base); isBundle(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// resolveEditorApp picks the application OpenPath should hand a path to, and
+// says why. An empty app means there is no editor to name and the path goes to
+// `open` on its own, which is the OS default — Finder, for a folder.
+//
+// The order, which the README documents and the frontend's "Open Folder in
+// Editor" command depends on:
+//
+//  1. $VISUAL, then $EDITOR. Only if the value names an application bundle:
+//     the common settings are terminal editors — vim, nano, an absolute path to
+//     nvim — and `open -a vim` is not a thing macOS can do. "code" is not a
+//     bundle either, but it falls through to step 2 and lands where its user
+//     meant it to.
+//  2. Visual Studio Code, if it is installed.
+//  3. TextEdit, but only for a file. It cannot open a folder.
+//  4. Nothing: `open <path>`.
+//
+// Worth knowing about step 1: a GUI app launched from the Dock or Finder
+// inherits launchd's environment, not a login shell's, so $VISUAL and $EDITOR
+// are normally unset here however carefully they are set in ~/.zshrc. They are
+// read because a user who wants them honoured can set them for the GUI session
+// (`launchctl setenv VISUAL "/Applications/Zed.app"`), not because most users
+// will have them.
+func resolveEditorApp(isDir bool) (app, why string) {
+	for _, key := range []string{"VISUAL", "EDITOR"} {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value == "" {
+			continue
+		}
+		// The whole value first: both an application name and a bundle path can
+		// contain spaces ("Visual Studio Code", "/Applications/Sublime
+		// Text.app"), so splitting before trying it would break the two settings
+		// most likely to work.
+		if bundle := findAppBundle(value); bundle != "" {
+			return bundle, "$" + key
+		}
+		// Then the first field alone: $EDITOR routinely carries flags ("code -w",
+		// "subl --wait"), and `open -a` takes an application, not a command line.
+		if fields := strings.Fields(value); len(fields) > 1 {
+			if bundle := findAppBundle(fields[0]); bundle != "" {
+				return bundle, "$" + key
+			}
+		}
+		log.Printf("open: $%s is %q, which is not an application bundle macOS can open a path with; trying the next editor", key, value)
+	}
+
+	if bundle := findAppBundle(preferredEditorApp); bundle != "" {
+		return bundle, preferredEditorApp
+	}
+	if !isDir {
+		if bundle := findAppBundle(fileEditorApp); bundle != "" {
+			return bundle, fileEditorApp
+		}
+	}
+	return "", "the default handler"
+}
+
+// OpenPath opens a file or folder in the user's editor.
+//
+// It used to be a bare `open <path>`, which hands a *folder* to its default
+// handler — Finder. That made the palette's "Open Folder in Editor" a second,
+// slower "Reveal in Finder", and made this binding's own documentation false.
+// See resolveEditorApp for the order the editor is chosen in.
+//
+// Unlike RevealPath it reports failure: the caller asked for something to
+// happen on screen, and nothing did. It does not wait for the editor — that is
+// a GUI app launching, and this runs on a binding the palette is awaiting — so
+// the error it can report is that `open` itself could not be started, not that
+// the editor declined the path.
+func (a *App) OpenPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("no path to open")
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%s is not an absolute path", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		log.Printf("open: %q cannot be opened: %v", path, err)
+		return fmt.Errorf("%s cannot be opened: %w", filepath.Base(path), err)
+	}
+
+	editor, why := resolveEditorApp(info.IsDir())
+	args := []string{path}
+	if editor != "" {
+		args = []string{"-a", editor, path}
+	}
+	log.Printf("open: %q in %q (from %s)", path, editor, why)
+
+	if err := startAndReap(exec.Command(updater.OpenPath, args...)); err != nil {
+		log.Printf("open: could not open %q: %v", path, err)
+		return err
+	}
+	return nil
+}
+
+// SaveWorkspace stores the frontend's layout JSON under a name the user chose.
+// stateJSON is the same document SaveAppState writes; see internal/workspace.
+func (a *App) SaveWorkspace(name, stateJSON string) error {
+	if err := workspace.Save(a.cfg.Dir(), name, stateJSON); err != nil {
+		log.Printf("workspace: %q was not saved: %v", name, err)
+		return err
+	}
+	log.Printf("workspace: saved %q (%d bytes)", name, len(stateJSON))
+	return nil
+}
+
+// ListWorkspaces returns every saved workspace, sorted by name. Never nil.
+func (a *App) ListWorkspaces() []workspace.Info {
+	return workspace.List(a.cfg.Dir())
+}
+
+// LoadWorkspace returns the layout JSON saved under a name. The frontend
+// rebuilds its tabs and panes from it exactly as it does from state.json.
+func (a *App) LoadWorkspace(name string) (string, error) {
+	slug := a.workspaceSlug(name)
+	state, err := workspace.Load(a.cfg.Dir(), slug)
+	if err != nil {
+		log.Printf("workspace: %q could not be loaded: %v", name, err)
+		return "", err
+	}
+	log.Printf("workspace: loaded %q from %q (%d bytes)", name, slug, len(state))
+	return state, nil
+}
+
+// DeleteWorkspace removes a saved workspace.
+func (a *App) DeleteWorkspace(name string) error {
+	slug := a.workspaceSlug(name)
+	if err := workspace.Delete(a.cfg.Dir(), slug); err != nil {
+		log.Printf("workspace: %q could not be deleted: %v", name, err)
+		return err
+	}
+	log.Printf("workspace: deleted %q (%s)", name, slug)
+	return nil
+}
+
+// workspaceSlug maps whatever the frontend passed onto the file on disk.
+//
+// Both spellings have to work. The picker lists workspaces and hands back the
+// Slug it was given; a user typing into a "which workspace?" prompt gives the
+// display Name. Slugging the name is nearly always enough — the function is
+// idempotent, so a slug slugs to itself — but not when two different names
+// collided and the second one was stored under a numbered slug: slugging *that*
+// name would point at the first one's file. So the list is consulted first, and
+// slugging is only the fallback that gets a recognisable name into the error.
+func (a *App) workspaceSlug(name string) string {
+	name = strings.TrimSpace(name)
+	for _, info := range workspace.List(a.cfg.Dir()) {
+		if info.Slug == name || strings.EqualFold(info.Name, name) {
+			return info.Slug
+		}
+	}
+	return workspace.Slug(name)
 }

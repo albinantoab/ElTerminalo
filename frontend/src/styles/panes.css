@@ -63,6 +63,51 @@
               0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
+/* Corner markers — a pane that is waiting for the user, and one that is
+   recording a transcript. Their own layer rather than pseudo-elements: the
+   leaf's ::before and ::after are already the active-pane brackets and the AI
+   glow, and a pane can be all of those at once. */
+.pane-markers {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+}
+
+.pane-marker {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.pane-marker-attention {
+  background: var(--accent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 80%, transparent);
+  animation: paneAttentionPulse 1.6s ease-in-out infinite;
+}
+
+.pane-marker-recording {
+  background: #f85149;
+  box-shadow: 0 0 8px rgba(248, 81, 73, 0.6);
+  animation: paneAttentionPulse 2.4s ease-in-out infinite;
+}
+
+@keyframes paneAttentionPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* A visible pane that is waiting for the user, while they are in another one.
+   Weaker than the bell flash — this state is held, not blinked. */
+.pane-leaf.needs-attention:not(.active) {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+}
+
 /* AI generating — pulsing glow at the bottom of active pane */
 .pane-leaf.active.ai-loading::after {
   content: '';

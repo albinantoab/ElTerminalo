@@ -249,3 +249,61 @@
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+
+/* Command block gutter marks — a bar in the left margin of every prompt line
+   that ran something, coloured by how it ended. Fixed-position, positioned
+   from the marker's buffer line; see CommandMarks. */
+.cmd-mark {
+  position: fixed;
+  z-index: 400;
+  width: 6px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+
+.cmd-mark:hover,
+.cmd-mark.cmd-mark-active {
+  opacity: 1;
+  width: 8px;
+}
+
+.cmd-mark.is-running {
+  border-left-color: #6b7280;
+}
+
+.cmd-mark.is-ok {
+  border-left-color: #56d364;
+}
+
+.cmd-mark.is-fail {
+  border-left-color: #f85149;
+}
+
+.cmd-mark.cmd-mark-active {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* The row a mark opens: the same chrome as the smart-render panel, one line
+   high, anchored under the block it belongs to. */
+.smart-panel.cmd-mark-actions {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid #3a3a4e;
+  border-left: 2px solid var(--accent);
+  max-height: none;
+}
+
+.cmd-mark-label {
+  flex: 1;
+  min-width: 0;
+  color: #9ca3af;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.5px;
+}

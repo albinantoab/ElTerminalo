@@ -1,7 +1,14 @@
-# Build outputs
-build/
+# Build outputs.
+#
+# build/bin, not build/. build/darwin holds Info.plist, Info.dev.plist and
+# entitlements.plist — the bundle's identity, its minimum system version and its
+# hardened-runtime exceptions. Those are sources, and ignoring them meant a
+# fresh clone had none of them: `wails build` silently regenerates its own
+# defaults (com.wails.<name>, LSMinimumSystemVersion 10.13.0, no privacy usage
+# strings), so a release built anywhere but this working copy shipped a
+# different app.
+build/bin/
 release/
-ElTerminalo.app/
 elterminalo
 
 # Go

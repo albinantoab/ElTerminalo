@@ -244,11 +244,15 @@ func shortenAttachGrace(t testing.TB, d time.Duration) {
 // SIGKILLed one line after hanging up the tty — a pending SIGKILL is delivered
 // before any handler runs, so every line typed in the pane died with it.
 func TestCloseLetsTheShellHandleHangup(t *testing.T) {
-	// A generous hangup grace on purpose: the assertion below is that Close
-	// returns well inside it, which a shell that exits on HUP does in
-	// milliseconds. A tight grace turns a loaded CI runner into a false
-	// failure at the SIGTERM rung, which is not what this test is about.
-	shortenLadder(t, 5*time.Second, 300*time.Millisecond, time.Second, 100*time.Millisecond)
+	// A very generous hangup grace on purpose. Both assertions below are about
+	// the code, not the clock: a shell that handles HUP is reaped in
+	// milliseconds, so Close returns almost immediately and the test stays fast
+	// no matter how large this is. Making it large is what keeps the machine out
+	// of the result — at 5s this flaked under `-race` on a loaded box, because
+	// the shell was not scheduled to run its trap before the SIGTERM rung took
+	// it. The teeth are intact: a regression that waits the grace out would take
+	// 30s and blow the limit below.
+	shortenLadder(t, 30*time.Second, 300*time.Millisecond, time.Second, 100*time.Millisecond)
 
 	dir := t.TempDir()
 	s := startTestShell(t, dir, savesOnHangup)
@@ -775,9 +779,14 @@ type emitRecorder struct {
 	names  []string
 	output map[string][]byte
 	exits  map[string]PtyExit
+	// stops holds every transcript:stopped payload, in emission order. A
+	// recording that retires itself is invisible otherwise — see
+	// TranscriptStoppedEvent.
+	stops []TranscriptStopped
 	// hook runs before an event is recorded, on the goroutine that emitted it.
-	// It is where a test injects a panic into the bridge; set it before the
-	// first session exists, so no goroutine is reading it while it is written.
+	// It is where a test injects a panic into the bridge — or blocks it, to hold
+	// the flusher still while the reader runs on. Set it before the first
+	// session exists, so no goroutine is reading it while it is written.
 	hook func(event string)
 }
 
@@ -825,7 +834,27 @@ func (r *emitRecorder) record(event string, data []interface{}) {
 		if len(data) == 1 {
 			r.exits[id], _ = data[0].(PtyExit)
 		}
+		return
 	}
+	if event == TranscriptStoppedEvent && len(data) == 1 {
+		if stop, ok := data[0].(TranscriptStopped); ok {
+			r.stops = append(r.stops, stop)
+		}
+	}
+}
+
+// transcriptStopsOf returns every transcript:stopped payload emitted for one
+// session, in emission order.
+func (r *emitRecorder) transcriptStopsOf(id string) []TranscriptStopped {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := []TranscriptStopped{}
+	for _, stop := range r.stops {
+		if stop.SessionID == id {
+			out = append(out, stop)
+		}
+	}
+	return out
 }
 
 // outputOf returns everything emitted for one session, decoded and concatenated

@@ -78,6 +78,71 @@ export interface WailsApp {
    *  imported theme's name, or "" when the user cancelled; rejects when the
    *  file could not be parsed. */
   ImportColorScheme(): Promise<string>;
+
+  // ── Attention ──
+  /** Set the Dock icon's badge, or clear it with "". The frontend sends the
+   *  total number of panes waiting for the user, debounced. */
+  SetDockBadge(label: string): Promise<void>;
+  /** Post a native notification. `paneKey` is handed back on the
+   *  `notification:activated` event when the user clicks the banner, so it has
+   *  to be the pane's own id. Resolves false when nothing was posted. */
+  Notify(title: string, body: string, paneKey: string): Promise<boolean>;
+  /** Whether the app may post notifications at all — asked once at startup.
+   *  False means the user (or the OS) said no, and Notify is never called. */
+  NotificationsReady(): Promise<boolean>;
+
+  // ── Transcripts ──
+  /** Start recording everything a session prints. Resolves with the file it is
+   *  being written to. */
+  StartTranscript(sessionID: string): Promise<string>;
+  StopTranscript(sessionID: string): Promise<void>;
+  /** Where a session's transcript is being written, or "" when it is not
+   *  recording. */
+  TranscriptPath(sessionID: string): Promise<string>;
+
+  // ── Open here ──
+  /** Show a path in Finder. */
+  RevealPath(path: string): Promise<void>;
+  /** Open a path in the user's editor. The backend resolves $VISUAL, then
+   *  $EDITOR, then Visual Studio Code, then TextEdit (files only), and
+   *  falls back to the OS default — it is not the OS's choice. */
+  OpenPath(path: string): Promise<void>;
+
+  // ── Workspaces ──
+  /** Store a whole window — the same JSON `SaveAppState` takes — under a name
+   *  the user chose. Saving over an existing name replaces it. */
+  SaveWorkspace(name: string, stateJSON: string): Promise<void>;
+  ListWorkspaces(): Promise<WorkspaceInfo[]>;
+  /** The saved state JSON for a workspace, by slug. */
+  LoadWorkspace(slug: string): Promise<string>;
+  DeleteWorkspace(slug: string): Promise<void>;
+}
+
+/** One entry of `ListWorkspaces`. `slug` is the key every other workspace call
+ *  takes; `name` is what the user typed. */
+export interface WorkspaceInfo {
+  name: string;
+  slug: string;
+  /** Seconds since the epoch, as the Go side wrote it. */
+  savedUnix: number;
+  tabs: number;
+  panes: number;
+}
+
+/** Payload of the `notification:activated` event: the user clicked a banner
+ *  this app posted, and `paneKey` is the `PaneInfo.id` it was posted for. A key
+ *  naming a pane that has since gone is ignored. */
+/** Payload of `transcript:stopped`: a recording the backend ended on its own,
+ *  either at the size cap or because the file could not be written. A user
+ *  stop never emits this — the frontend already knows about those. */
+export interface TranscriptStoppedPayload {
+  sessionID: string;
+  path: string;
+  reason: 'cap' | 'error';
+}
+
+export interface NotificationActivatedPayload {
+  paneKey: string;
 }
 
 /** The subset of config.json this app reads. The Go side owns the file, its

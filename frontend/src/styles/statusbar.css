@@ -196,3 +196,32 @@
 .status-dot-active {
   color: var(--accent);
 }
+
+/* How many panes are waiting for the user, across every tab. A state rather
+   than a shortcut hint, so it lives on the left with the update badge — the
+   right-hand row of hints is full. */
+.status-attention {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 4px 8px 2px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 0;
+  letter-spacing: 0.5px;
+  transition: background 0.15s;
+}
+
+.status-attention:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* Shown only while a pane fills its tab. */
+.status-zoom {
+  color: #9ca3af;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 4px 8px 2px;
+  border: 1px solid var(--border);
+  letter-spacing: 1px;
+}

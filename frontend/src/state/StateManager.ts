@@ -56,6 +56,35 @@ export class StateManager {
     return p;
   }
 
+  /** The window as it stands, in the shape that goes to disk.
+   *
+   *  Public because a workspace is the same thing under a different name: it is
+   *  written by `SaveWorkspace` and read back by `restoreState`'s own code
+   *  path, so the two must agree byte for byte — hence one serializer rather
+   *  than a second one that drifts. Resolves null when there is nothing worth
+   *  saving: no tabs, or a restore still in flight. */
+  async serializeState(): Promise<SavedState | null> {
+    // Re-checked by every caller's own path too, but this is the one place that
+    // can answer it for all of them: mid-restore the window is half built, and
+    // what it looks like right now is not a window anyone had.
+    if (this.callbacks.isRestoring()) return null;
+    const tabs = this.callbacks.getTabs();
+    if (tabs.length === 0) return null;
+    const savedTabs: SavedTab[] = [];
+    for (const tab of tabs) {
+      const layout = tab.layoutRoot
+        ? await this.serializeLayout(tab.layoutRoot)
+        : { type: 'leaf' as const };
+      savedTabs.push({ name: tab.name, renamed: tab.renamed, layout });
+    }
+    return {
+      version: STATE_VERSION,
+      themeName: this.callbacks.getCurrentThemeName(),
+      activeTabIndex: this.callbacks.getActiveTabIndex(),
+      tabs: savedTabs,
+    };
+  }
+
   /** Serialize the window and hand it to the backend. Never rejects: a save
    *  that fails is logged, because the callers that await it (the quit
    *  handshake, a rename) must not be blocked by it. */
@@ -64,24 +93,8 @@ export class StateManager {
     // host's code, so a throw from one of them would break the promise this
     // method makes to its callers.
     try {
-      // Re-checked here because a coalesced write runs later than the save()
-      // call that asked for it.
-      if (this.callbacks.isRestoring()) return;
-      const tabs = this.callbacks.getTabs();
-      if (tabs.length === 0) return;
-      const savedTabs: SavedTab[] = [];
-      for (const tab of tabs) {
-        const layout = tab.layoutRoot
-          ? await this.serializeLayout(tab.layoutRoot)
-          : { type: 'leaf' as const };
-        savedTabs.push({ name: tab.name, renamed: tab.renamed, layout });
-      }
-      const state: SavedState = {
-        version: STATE_VERSION,
-        themeName: this.callbacks.getCurrentThemeName(),
-        activeTabIndex: this.callbacks.getActiveTabIndex(),
-        tabs: savedTabs,
-      };
+      const state = await this.serializeState();
+      if (!state) return;
       await window.go.main.App.SaveAppState(JSON.stringify(state));
     } catch (e) {
       logError('Failed to save the window layout', e);

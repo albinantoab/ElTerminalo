@@ -125,6 +125,26 @@ type Session struct {
 	// is closed once, by attach, to wake the flusher.
 	attachOnce sync.Once
 	attachedCh chan struct{}
+
+	// --- transcript (the raw recording of everything the pty produced) ---
+	//
+	// transcriptMu guards the pointer below, everything reachable through it,
+	// and the seal. Deliberately its own lock rather than ptmxMu: the reader
+	// takes this on every read that has something to record, and ptmxMu's whole
+	// design is that the read path never touches it (see withPtmx).
+	transcriptMu sync.Mutex
+	transcript   *transcript
+	// transcriptSealed is set once the reader that feeds a recording has
+	// stopped. A session stays in the manager's map for a little while after
+	// that — the exit path holds it through the attach grace — and a recording
+	// started in that window would have nobody left to write to it or close it.
+	transcriptSealed bool
+	// emit is the manager's event seam, handed over at creation. A recording
+	// that retires *itself* — a write that failed, the size cap — has to be able
+	// to say so, and the goroutines that discover it (the reader and the flush
+	// ticker) belong to the session rather than to the manager. Nil for a
+	// session built outside a Manager, which is why every use is guarded.
+	emit func(event string, data ...interface{})
 }
 
 // NewSession spawns a shell in a new PTY. If cwd is empty, defaults to home.

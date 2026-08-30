@@ -4,9 +4,12 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // --- the bell rate limit ---
@@ -196,4 +199,353 @@ func TestBellIsSafeForConcurrentUse(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// --- what a terminal-supplied string is allowed to become ---
+
+// The title, the notification text and the Dock badge all end up as strings
+// AppKit renders, and all three ultimately come from an escape sequence any
+// program the user runs can print.
+func TestSanitizersDropTheRunesThatReorderText(t *testing.T) {
+	// U+202E reverses everything after it; U+200B is invisible; \r\n and \x1b
+	// are control characters.
+	nasty := "safe‮desrever​\r\n\x1b[31m"
+
+	if got := sanitizeWindowTitle(nasty); got != "safedesrever[31m" {
+		t.Errorf("sanitizeWindowTitle(%q) = %q", nasty, got)
+	}
+	if got := sanitizeNotificationText(nasty, 128); got != "safedesrever[31m" {
+		t.Errorf("sanitizeNotificationText(%q) = %q", nasty, got)
+	}
+	if got := sanitizeBadgeLabel(nasty); got != "safedesr" {
+		t.Errorf("sanitizeBadgeLabel(%q) = %q", nasty, got)
+	}
+}
+
+func TestSanitizeWindowTitle(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", appTitle},
+		{"   ", appTitle},
+		{"\x00\x01\x02", appTitle},
+		{"  ~/src/elterminalo  ", "~/src/elterminalo"},
+		{"zsh", "zsh"},
+	}
+	for _, c := range cases {
+		if got := sanitizeWindowTitle(c.in); got != c.want {
+			t.Errorf("sanitizeWindowTitle(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	long := sanitizeWindowTitle(strings.Repeat("a", maxWindowTitleBytes*3))
+	if len(long) != maxWindowTitleBytes {
+		t.Errorf("a long title came out %d bytes, want %d", len(long), maxWindowTitleBytes)
+	}
+	// A cut that lands mid-rune must move back, never leave half of one.
+	multi := sanitizeWindowTitle(strings.Repeat("é", maxWindowTitleBytes))
+	if !utf8.ValidString(multi) {
+		t.Errorf("truncation split a rune: %q", multi)
+	}
+	if len(multi) > maxWindowTitleBytes {
+		t.Errorf("a multi-byte title came out %d bytes, want at most %d", len(multi), maxWindowTitleBytes)
+	}
+}
+
+// An empty title falls back to the app's name; an empty body must not, or every
+// notification without a body would claim to be about the app itself.
+func TestSanitizeNotificationTextLeavesAnEmptyResultEmpty(t *testing.T) {
+	for _, in := range []string{"", "   ", "\r\n\t", "​"} {
+		if got := sanitizeNotificationText(in, maxNotificationBodyBytes); got != "" {
+			t.Errorf("sanitizeNotificationText(%q) = %q, want empty", in, got)
+		}
+	}
+
+	long := sanitizeNotificationText(strings.Repeat("b", maxNotificationBodyBytes*2), maxNotificationBodyBytes)
+	if len(long) != maxNotificationBodyBytes {
+		t.Errorf("a long body came out %d bytes, want %d", len(long), maxNotificationBodyBytes)
+	}
+}
+
+func TestSanitizeBadgeLabel(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"   ", ""},
+		{"3", "3"},
+		{"12", "12"},
+		{"  7  ", "7"},
+		{"a\nb", "a b"},
+		{"3\t4", "3 4"},
+		{"a  b   c", "a b c"},
+		{"123456789", "12345678"},
+		{"999+", "999+"},
+	}
+	for _, c := range cases {
+		if got := sanitizeBadgeLabel(c.in); got != c.want {
+			t.Errorf("sanitizeBadgeLabel(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// The cap is in runes, not bytes: eight emoji are eight characters, and
+	// cutting one in half would put a replacement character on the Dock.
+	badge := sanitizeBadgeLabel(strings.Repeat("🚀", 20))
+	if n := utf8.RuneCountInString(badge); n != maxDockBadgeRunes {
+		t.Errorf("a long badge came out %d runes, want %d", n, maxDockBadgeRunes)
+	}
+	if !utf8.ValidString(badge) {
+		t.Errorf("the badge cap split a rune: %q", badge)
+	}
+}
+
+// --- transcript filenames ---
+
+// The session id is joined into a path and it arrives from the webview.
+func TestShortSessionID(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"9f1c2b3a-4d5e-6f70-8a9b-0c1d2e3f4a5b", "9f1c2b3a"},
+		{"short", "short"},
+		{"", "session"},
+		{"../../etc/passwd", "______et"},
+		{"a/b\\c:d", "a_b_c_d"},
+		{"ABC_def-1", "ABC_def-"},
+		{"日本語", "___"},
+	}
+	for _, c := range cases {
+		got := shortSessionID(c.in)
+		if got != c.want {
+			t.Errorf("shortSessionID(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if strings.ContainsAny(got, `/\.`) {
+			t.Errorf("shortSessionID(%q) = %q, which can escape its directory", c.in, got)
+		}
+		if len(got) > transcriptIDChars && c.in != "" {
+			t.Errorf("shortSessionID(%q) = %q, longer than %d characters", c.in, got, transcriptIDChars)
+		}
+	}
+}
+
+// --- opening things ---
+
+// OpenPath execs /usr/bin/open with a string from the webview, where a leading
+// "-" would be read as a flag.
+func TestOpenPathRefusesAnythingButAnExistingAbsolutePath(t *testing.T) {
+	silenceLog(t)
+	app := &App{}
+
+	dir := t.TempDir()
+	for _, path := range []string{
+		"", "relative/path", "./also-relative", "-R", "--args",
+		filepath.Join(dir, "does-not-exist"),
+	} {
+		if err := app.OpenPath(path); err == nil {
+			t.Errorf("OpenPath(%q) reported success", path)
+		}
+	}
+
+	// RevealPath cannot report anything, so all that is asserted is that the
+	// same inputs do not panic or launch anything.
+	for _, path := range []string{"", "relative/path", "-R", filepath.Join(dir, "nope")} {
+		app.RevealPath(path)
+	}
+}
+
+// --- notification logging ---
+
+// A notification is asked for when the frontend sees OSC 9, which is a sequence
+// any program can print as fast as it likes. Only the log is bounded — the
+// binding's false must keep meaning "unavailable or unauthorized".
+func TestNotifyLogIsRateLimited(t *testing.T) {
+	silenceLog(t)
+	prevLimiter, prevClock := notifyLog, bellClock
+	t.Cleanup(func() { notifyLog, bellClock = prevLimiter, prevClock })
+
+	clk := &fakeClock{now: time.Unix(1800000000, 0)}
+	notifyLog = newBellLimiter(bellBurst, bellRatePerSec, bellAttentionGap)
+	bellClock = clk.Now
+
+	for range bellBurst {
+		if allowed, _, _ := notifyLog.take(clk.Now()); !allowed {
+			t.Fatal("a line inside the burst was dropped")
+		}
+	}
+	for range 10_000 {
+		if allowed, _, _ := notifyLog.take(clk.Now()); allowed {
+			t.Fatal("a line past the burst was written with no time having passed")
+		}
+	}
+
+	// Notify itself still answers, however many times it is called: an
+	// unauthorized process returns false, and never blocks doing it.
+	app := &App{}
+	for range 1000 {
+		if app.Notify("Build finished", "exit 0", "tab-1/pane-2") {
+			t.Fatal("Notify reported success in a process with no notification center")
+		}
+	}
+	if app.Notify("", "", "k") {
+		t.Fatal("Notify reported success for a notification with no text")
+	}
+}
+
+// --- which editor "Open Folder in Editor" actually opens ---
+
+// fakeAppDir builds a directory of (empty) application bundles and points the
+// bundle search at it, so a test's answer does not depend on what is installed
+// on the machine running it.
+func fakeAppDir(t *testing.T, apps ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range apps {
+		if err := os.MkdirAll(filepath.Join(dir, name+".app"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prev := appSearchDirs
+	t.Cleanup(func() { appSearchDirs = prev })
+	appSearchDirs = func() []string { return []string{dir} }
+	return dir
+}
+
+// OpenPath used to be a bare `open <path>`, and `open` on a directory hands it
+// to Finder — so "Open Folder in Editor" and "Reveal in Finder" were the same
+// command twice. This is the order that fixes it.
+func TestResolveEditorAppPicksAnEditorRatherThanTheFolderHandler(t *testing.T) {
+	silenceLog(t)
+
+	cases := []struct {
+		name      string
+		installed []string
+		visual    string
+		editor    string
+		isDir     bool
+		wantApp   string // "" means: hand it to `open` on its own
+		wantWhy   string
+	}{{
+		name:      "VISUAL wins when it names a bundle",
+		installed: []string{"Zed", "Nova", preferredEditorApp},
+		visual:    "Zed",
+		editor:    "Nova",
+		isDir:     true,
+		wantApp:   "Zed.app",
+		wantWhy:   "$VISUAL",
+	}, {
+		name:      "EDITOR is next",
+		installed: []string{"Nova", preferredEditorApp},
+		editor:    "Nova",
+		isDir:     true,
+		wantApp:   "Nova.app",
+		wantWhy:   "$EDITOR",
+	}, {
+		// The whole point of the .app check: `open -a vim` is not a thing.
+		name:      "a terminal editor is skipped",
+		installed: []string{preferredEditorApp},
+		visual:    "vim",
+		editor:    "nano",
+		isDir:     true,
+		wantApp:   preferredEditorApp + ".app",
+		wantWhy:   preferredEditorApp,
+	}, {
+		name:      "flags are not part of the application name",
+		installed: []string{"Zed"},
+		visual:    "Zed --wait",
+		isDir:     true,
+		wantApp:   "Zed.app",
+		wantWhy:   "$VISUAL",
+	}, {
+		name:      "an editor named with a .app suffix still resolves",
+		installed: []string{"Zed"},
+		editor:    "Zed.app",
+		isDir:     true,
+		wantApp:   "Zed.app",
+		wantWhy:   "$EDITOR",
+	}, {
+		// A bare application name with spaces in it is the other setting that
+		// has to survive the flag-stripping.
+		name:      "an application name with spaces",
+		installed: []string{"Sublime Text"},
+		editor:    "Sublime Text",
+		isDir:     true,
+		wantApp:   "Sublime Text.app",
+		wantWhy:   "$EDITOR",
+	}, {
+		name:      "Visual Studio Code when nothing is named",
+		installed: []string{preferredEditorApp, fileEditorApp},
+		isDir:     true,
+		wantApp:   preferredEditorApp + ".app",
+		wantWhy:   preferredEditorApp,
+	}, {
+		name:      "TextEdit for a file when there is nothing better",
+		installed: []string{fileEditorApp},
+		isDir:     false,
+		wantApp:   fileEditorApp + ".app",
+		wantWhy:   fileEditorApp,
+	}, {
+		// TextEdit declares no folder document type, so handing it a directory
+		// launches it only to show its own error. The OS default is the honest
+		// answer here.
+		name:      "never TextEdit for a folder",
+		installed: []string{fileEditorApp},
+		isDir:     true,
+		wantApp:   "",
+	}, {
+		name:      "nothing installed at all",
+		installed: nil,
+		isDir:     true,
+		wantApp:   "",
+	}, {
+		// $EDITOR is the user's own string, but it is still being joined into a
+		// path under /Applications.
+		name:      "a name that would climb out of the search directories is refused",
+		installed: []string{preferredEditorApp},
+		visual:    "../../../../etc",
+		isDir:     true,
+		wantApp:   preferredEditorApp + ".app",
+		wantWhy:   preferredEditorApp,
+	}}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := fakeAppDir(t, c.installed...)
+			t.Setenv("VISUAL", c.visual)
+			t.Setenv("EDITOR", c.editor)
+
+			app, why := resolveEditorApp(c.isDir)
+			want := ""
+			if c.wantApp != "" {
+				want = filepath.Join(dir, c.wantApp)
+			}
+			if app != want {
+				t.Errorf("resolveEditorApp(isDir=%t) = %q, want %q", c.isDir, app, want)
+			}
+			if c.wantWhy != "" && why != c.wantWhy {
+				t.Errorf("reason = %q, want %q", why, c.wantWhy)
+			}
+		})
+	}
+}
+
+// An editor named by its full path is the escape hatch for one installed
+// somewhere the search does not look.
+func TestResolveEditorAppAcceptsAnAbsoluteBundlePathAndNothingElse(t *testing.T) {
+	silenceLog(t)
+	fakeAppDir(t) // nothing installed, so only the env var can answer
+
+	bundle := filepath.Join(t.TempDir(), "Somewhere Else.app")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EDITOR", "")
+	t.Setenv("VISUAL", bundle)
+	if got, why := resolveEditorApp(true); got != bundle || why != "$VISUAL" {
+		t.Errorf("resolveEditorApp with $VISUAL=%q = (%q, %q)", bundle, got, why)
+	}
+
+	// An absolute path that is not a bundle is a terminal editor, whatever its
+	// name: `open -a` cannot run one, so it has to fall through.
+	cli := filepath.Join(t.TempDir(), "nvim")
+	if err := os.WriteFile(cli, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VISUAL", cli)
+	if got, _ := resolveEditorApp(true); got != "" {
+		t.Errorf("resolveEditorApp with $VISUAL=%q = %q, want the OS default", cli, got)
+	}
 }

@@ -1,4 +1,5 @@
 import { Terminal, IMarker, IDecoration, IDisposable } from '@xterm/xterm';
+import type { CommandStatus } from '../types';
 
 export interface CommandBlock {
   promptMarker: IMarker;
@@ -8,6 +9,12 @@ export interface CommandBlock {
   exitCode: number | null;
   commandText: string | null;
   decorations: IDecoration[];
+  /** `Date.now()` when the command started running (the C mark) and when it
+   *  finished (D), or null. Both are wall clock rather than
+   *  `performance.now()`: the only thing they are used for is the "ran for
+   *  1.4s" in a mark's tooltip. */
+  startedAt: number | null;
+  endedAt: number | null;
 }
 
 export class ShellIntegration {
@@ -16,8 +23,14 @@ export class ShellIntegration {
   private currentBlock: CommandBlock | null = null;
   private oscHandler: IDisposable | null = null;
   private active = false;
+  // Where the shell is in the command it is running. Driven entirely by the
+  // OSC 133 marks — nothing here polls, and a shell without integration stays
+  // 'idle' forever, which is the honest answer for a pane that cannot say.
+  private status: CommandStatus = 'idle';
   public onCommandFinished: ((exitCode: number) => void) | null = null;
   private commandFinishedListeners: ((block: CommandBlock, exitCode: number) => void)[] = [];
+  private blockChangedListeners: ((block: CommandBlock) => void)[] = [];
+  private statusListeners: ((status: CommandStatus) => void)[] = [];
 
   constructor(terminal: Terminal) {
     this.terminal = terminal;
@@ -60,6 +73,8 @@ export class ShellIntegration {
       exitCode: null,
       commandText: null,
       decorations: [],
+      startedAt: null,
+      endedAt: null,
     };
 
     // Clean up block when marker is disposed (scrollback trimmed)
@@ -83,6 +98,7 @@ export class ShellIntegration {
     if (!this.currentBlock) return;
     const marker = this.terminal.registerMarker(0);
     if (marker) this.currentBlock.outputStartMarker = marker;
+    this.currentBlock.startedAt = Date.now();
 
     // Parse command text from C mark: "C;cmd=<base64>"
     const cmdMatch = data.match(/cmd=([A-Za-z0-9+/=]+)/);
@@ -91,6 +107,11 @@ export class ShellIntegration {
         this.currentBlock.commandText = atob(cmdMatch[1]);
       } catch { /* invalid base64 */ }
     }
+
+    // The command is off: everything watching this pane — the tab's status dot,
+    // the gutter mark that has just become worth drawing — hears it here.
+    this.setStatus('running');
+    this.emitBlockChanged(this.currentBlock);
   }
 
   private handleCommandFinished(exitCode: number): void {
@@ -98,27 +119,70 @@ export class ShellIntegration {
     const marker = this.terminal.registerMarker(0);
     if (marker) this.currentBlock.outputEndMarker = marker;
     this.currentBlock.exitCode = exitCode;
+    this.currentBlock.endedAt = Date.now();
     this.addExitCodeDecoration(this.currentBlock);
     this.blocks.push(this.currentBlock);
     const finishedBlock = this.currentBlock;
     this.currentBlock = null;
+    // Deliberately not back to 'idle': what the pane last did is what the tab's
+    // dot is about, and it stays true until the next command starts.
+    this.setStatus(exitCode === 0 ? 'done' : 'failed');
+    this.emitBlockChanged(finishedBlock);
     if (this.onCommandFinished) this.onCommandFinished(exitCode);
     for (const listener of this.commandFinishedListeners) listener(finishedBlock, exitCode);
   }
 
   private addPromptDecoration(_block: CommandBlock): void {
-    // Decorations overlay terminal text — not usable for gutter marks.
-    // Visual indicators are handled externally (pane border, status bar).
+    // Deliberately empty. xterm decorations overlay terminal *text* — they are
+    // drawn in the cell grid — so they cannot be gutter marks. The marks live
+    // outside the terminal entirely, as absolutely positioned elements over the
+    // pane; see CommandMarks, which subscribes through onBlockChangedAdd.
   }
 
   private addExitCodeDecoration(_block: CommandBlock): void {
-    // Exit code visuals handled externally.
+    // Same story: the exit code colours the block's gutter mark, not a
+    // decoration inside the buffer.
+  }
+
+  private setStatus(next: CommandStatus): void {
+    if (this.status === next) return;
+    this.status = next;
+    for (const listener of this.statusListeners) listener(next);
+  }
+
+  private emitBlockChanged(block: CommandBlock): void {
+    for (const listener of this.blockChangedListeners) listener(block);
   }
 
   // --- Public API ---
 
   isActive(): boolean {
     return this.active;
+  }
+
+  /** Where this pane's shell is in the command it is running. */
+  getStatus(): CommandStatus {
+    return this.status;
+  }
+
+  /** Called whenever that changes. Returns an unsubscribe. */
+  onStatusChangeAdd(listener: (status: CommandStatus) => void): () => void {
+    this.statusListeners.push(listener);
+    return () => {
+      const idx = this.statusListeners.indexOf(listener);
+      if (idx >= 0) this.statusListeners.splice(idx, 1);
+    };
+  }
+
+  /** Called when a block starts running and again when it finishes — the two
+   *  moments a gutter mark has to appear and then take its colour. Returns an
+   *  unsubscribe. */
+  onBlockChangedAdd(listener: (block: CommandBlock) => void): () => void {
+    this.blockChangedListeners.push(listener);
+    return () => {
+      const idx = this.blockChangedListeners.indexOf(listener);
+      if (idx >= 0) this.blockChangedListeners.splice(idx, 1);
+    };
   }
 
   getBlocks(): CommandBlock[] {
@@ -211,6 +275,9 @@ export class ShellIntegration {
     this.blocks = [];
     this.currentBlock = null;
     this.active = false;
+    // A fresh shell has run nothing, so the tab's dot must stop claiming the
+    // dead one's last exit code.
+    this.setStatus('idle');
   }
 
   dispose(): void {
@@ -218,6 +285,8 @@ export class ShellIntegration {
       this.oscHandler.dispose();
       this.oscHandler = null;
     }
+    this.blockChangedListeners = [];
+    this.statusListeners = [];
     for (const block of this.blocks) {
       block.decorations.forEach(d => d.dispose());
     }

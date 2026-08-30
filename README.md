@@ -8,6 +8,8 @@ A modern, GPU-accelerated terminal emulator for macOS.
 
 Download the latest `.dmg` from [Releases](https://github.com/albinantoab/ElTerminalo/releases/latest), open it, and drag **El Terminalo** to your Applications folder.
 
+**Requires macOS 12 Monterey or later**, on Apple silicon. That is the floor the Go toolchain the app is built with sets — the binary declares it in its Mach-O header, so an older system refuses to load it rather than failing in some interesting way later.
+
 ## Features
 
 - **Tabbed interface** — Up to 9 tabs with Cmd+1-9 switching
@@ -16,6 +18,9 @@ Download the latest `.dmg` from [Releases](https://github.com/albinantoab/ElTerm
 - **Custom commands** — Save frequently used commands globally or per-project
 - **Themes** — Built-in themes + create your own via the palette
 - **State persistence** — Tabs, splits, and working directories restored on restart
+- **Notifications** — A native banner and a Dock badge when a pane finishes while you are elsewhere
+- **Transcripts** — Record everything a pane prints to a file
+- **Workspaces** — Save a named layout and reopen it later
 - **GPU-accelerated rendering** — WebGL-powered terminal via xterm.js
 - **Native macOS look** — Transparent titlebar, proper window management
 
@@ -52,13 +57,18 @@ The menu bar lists these too — every item there does exactly what its shortcut
 | `Cmd + Shift + D` | Split horizontally |
 | `Cmd + Shift + X` | Close pane |
 | `Cmd + Arrow` | Navigate between panes |
+| `Cmd + Shift + Return` | Zoom the active pane (fill the tab / restore) |
+| `Cmd + Shift + A` | Jump to the next pane needing attention |
 | `Cmd + F` | Find in scrollback |
 | `Cmd + L` | Clear terminal |
 | `Cmd + I` | Session status |
 | `Cmd + Shift + R` | Search command history |
+| `Cmd + Shift + O` | Reveal the pane's folder in Finder |
 | `Cmd + =` / `-` / `0` | Zoom in / out / actual size |
 | `Cmd + Shift + C` | Create custom command |
 | `Ctrl + Cmd + F` | Toggle full screen |
+
+**File › Save Workspace…**, **File › Open Workspace…** and **File › Record Transcript** have no shortcut — they are deliberate, occasional actions, and the first two open a prompt rather than doing anything on their own.
 
 ## Configuration
 
@@ -115,6 +125,90 @@ Unknown keys are ignored, which makes them a convenient place to leave yourself 
 
 The theme is named after the file and saved to `~/.config/elterminalo/themes.json`, replacing any theme of the same name. The 16 ANSI colours, background, foreground, cursor and selection come straight from the file; the app's own accent, borders and status bar are derived from them (the accent is the scheme's blue).
 
+## Notifications
+
+El Terminalo can post a native macOS banner when something finishes in a pane you are not looking at. Two things ask for one:
+
+- **The shell's bell** — the `BEL` byte (`\a`), which is what a shell prints when a command completes in a pane that is not focused, and what `printf '\a'` sends by hand.
+- **`OSC 9` and `OSC 777`** — the escape sequences programs use to raise a desktop notification directly:
+
+  ```bash
+  printf '\033]9;Build finished\007'                     # OSC 9: body only
+  printf '\033]777;notify;Build finished;exit 0\007'      # OSC 777: title and body
+  ```
+
+Clicking the banner brings the window forward and focuses the pane the notification came from, whichever tab it is in.
+
+**macOS asks for permission the first time**, with the usual "El Terminalo would like to send you notifications" alert. Answer it once and the answer is remembered for good — the app never asks again. To change your mind later, go to **System Settings › Notifications › El Terminalo**. If notifications are off, the app falls back to the in-window attention markers described below and says so in the log; nothing is silently dropped.
+
+Notifications need the packaged app. A binary run straight from `wails build`'s output or from `wails dev` has no bundle identifier, so macOS has nothing to attribute a notification to and the feature turns itself off.
+
+### The Dock badge
+
+While the app is in the background, the number of panes waiting for you appears as a badge on the Dock icon, and clears as you visit them. It needs no permission and is always on.
+
+Separately, a bell in a background window bounces the Dock icon once and leaves the tile marked — that is the `bell` setting, not this.
+
+## Panes
+
+**Cmd + Shift + Return** zooms the active pane so it fills its tab, and again to put the split back. Nothing is closed or restarted; the other panes keep running behind it.
+
+**Cmd + Shift + A** jumps to the next pane needing attention — one whose command finished, or whose bell rang, while you were somewhere else. It walks across tabs, so it is the fastest way to work through what happened while you were away.
+
+**Cmd + Shift + O** (File › Reveal Folder in Finder) opens the active pane's working directory in Finder, with it selected.
+
+**Open Folder in Editor** (command palette) hands the same directory to an editor instead. It picks the first of these that it can find:
+
+1. `$VISUAL`, then `$EDITOR` — but only when the value names a macOS application. A terminal editor (`vim`, `nano`, a path to `nvim`) is skipped, because `open -a vim` is not something macOS can do; `code` is skipped too and lands on Visual Studio Code at the next step, which is where its user meant it to go. Flags are ignored (`code -w` resolves as `code`), and a full path to a bundle works for an editor installed somewhere unusual (`/Users/you/Dev/Zed.app`).
+2. **Visual Studio Code**, if it is installed.
+3. **TextEdit**, but only for a file — it cannot open a folder.
+4. Otherwise the folder goes to the system default, which is Finder.
+
+Applications are looked for in `~/Applications`, `/Applications`, `/Applications/Utilities` and the two `/System/Applications` directories. Note that a GUI app inherits launchd's environment rather than a login shell's, so `$VISUAL` and `$EDITOR` set in `~/.zshrc` are **not** visible here; to have them honoured, set them for the GUI session — `launchctl setenv VISUAL "/Applications/Zed.app"` — or launch El Terminalo from a shell.
+
+## Transcripts
+
+**File › Record Transcript** starts writing everything the active pane prints to a file, and the same item stops it.
+
+A recording ends in one of four ways, and the pane is told about all of them:
+
+- you stop it,
+- the pane closes,
+- the file reaches **256 MiB**, or
+- a write to it fails — a full disk, a volume that went away.
+
+The last two are the ones worth knowing about. A recording left running overnight must not be able to fill your disk, so it stops itself at the cap; a recording whose disk fails is abandoned rather than allowed to stall the pane, because a broken transcript is not a broken pane and your shell keeps running either way. In both cases the file is closed off cleanly, the recording indicator goes out, and the pane says which file it stopped and why — a transcript never quietly stops growing while the app still claims to be recording. The cap is crossed by at most one read (64 KiB), so the file is a little over 256 MiB, not exactly.
+
+Transcripts are written to:
+
+```
+~/.config/elterminalo/transcripts/<yyyy-mm-dd>/<HHMMSS>-<session>.log
+```
+
+— one folder per day, and one file per recording, named after the time it started and the first eight characters of the pane's session id. The folder and the files are owner-only (`0700` / `0600`): a transcript holds everything a pane printed, which is your commands, their output, and the paths you were working in.
+
+**A transcript is the raw stream, not a cleaned-up log.** Colour codes, cursor movement, progress-bar redraws and every other escape sequence are recorded exactly as the program emitted them — that is the point, since a stripped file would no longer be a record of what the pane actually did. To read one back the way it looked:
+
+```bash
+# Replay it exactly as it looked, colours and all
+cat ~/.config/elterminalo/transcripts/2026-08-30/142530-9f1c2b3a.log
+
+# Page through it with the colours kept
+less -R ~/.config/elterminalo/transcripts/2026-08-30/142530-9f1c2b3a.log
+
+# Strip the escape sequences so it can be grepped
+sed $'s/\033\[[0-9;?]*[a-zA-Z]//g' <file> > plain.txt
+```
+
+## Workspaces
+
+A workspace is a named snapshot of your layout — every tab, every split, and each pane's working directory. It is the same thing the app restores on restart, except that you choose when to take it and nothing overwrites it afterwards.
+
+- **File › Save Workspace…** asks for a name and stores the current layout under it. Saving again under the same name replaces it.
+- **File › Open Workspace…** lists what you have saved, with the date and the tab and pane counts, and rebuilds the one you pick.
+
+They live in `~/.config/elterminalo/workspaces/`, one owner-only `.json` file per workspace, named after a slug of the name you gave it (`My Project` → `my-project.json`). The name you typed is kept inside the file, so it is the name you see in the list — two different names that reduce to the same slug are stored side by side (`my-project.json`, `my-project-2.json`) rather than one replacing the other. Deleting a workspace from the picker removes its file; nothing else in the directory is touched, so a file you drop in there by hand is listed too.
+
 ## Custom Commands
 
 Commands can be saved globally (`~/.config/elterminalo/commands.json`) or per-project (`.elterminalo/commands.json` in your project directory).
@@ -149,7 +243,7 @@ Create your own theme via the command palette ("Create Theme") or edit existing 
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+ (the version `go.mod` names; it is also what sets the macOS 12 floor above)
 - Node.js 18+
 - [Wails v2](https://wails.io/) CLI
 

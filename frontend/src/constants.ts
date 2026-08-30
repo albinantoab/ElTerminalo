@@ -68,6 +68,30 @@ export const BELL_FLASH_MS = 150;
 // same notification eight thousand times is still one notification.
 export const BELL_COALESCE_MS = 200;
 
+// A pane "needs attention" when its shell asked for it — a bell, an OSC 9 or
+// an OSC 777 notification — and the pane is not the one being looked at. These
+// bound what the app does about it.
+//
+// The Dock badge is one binding call per change, and a burst of finishing
+// commands changes it several times in a row; the count is what matters, not
+// each step towards it.
+export const DOCK_BADGE_DEBOUNCE_MS = 200;
+// At most one native notification per pane in this window. A `make` that rings
+// once per failing target would otherwise post one banner per target.
+export const NOTIFY_PER_PANE_MS = 5_000;
+// And at most this many across all panes in a second, whatever they are. Past
+// that the notification centre is the thing demanding attention.
+export const NOTIFY_BURST_MAX = 3;
+export const NOTIFY_BURST_WINDOW_MS = 1_000;
+// A notification's title and body are chosen by whatever is on the far end of
+// the pty. This is as much of either as a banner can show.
+export const NOTIFY_TEXT_MAX_LENGTH = 200;
+
+// Command-block gutter marks. One per command that actually ran, each holding a
+// marker into the buffer; the oldest go first so a long session cannot grow an
+// unbounded number of absolutely-positioned elements over one pane.
+export const MAX_COMMAND_MARKS = 60;
+
 // Find: the shortest term worth lighting every match of. The search addon
 // re-scans the whole buffer to build its highlights, and a single character
 // matches most of it — the cost is at its highest exactly where the result is
@@ -150,10 +174,12 @@ export const CMD = {
   CLOSE_PANE:       cmd('Close Pane',         'Close the active pane',                    'CMD+SHIFT+X',  'Panes'),
   NEXT_PANE:        cmd('Next Pane',          'Focus the next pane',                      'CMD+→',        'Panes'),
   PREV_PANE:        cmd('Previous Pane',      'Focus the previous pane',                  'CMD+←',        'Panes'),
+  ZOOM_PANE:        cmd('Zoom Pane',          'Fill the tab with the active pane',        'CMD+SHIFT+↵',  'Panes'),
 
   // Navigation
   NAV_PREV_COMMAND: cmd('Previous Command',   'Jump to previous command prompt',           'CMD+SHIFT+↑',  'Navigation'),
   NAV_NEXT_COMMAND: cmd('Next Command',       'Jump to next command prompt',               'CMD+SHIFT+↓',  'Navigation'),
+  NEXT_ATTENTION:   cmd('Next Attention',     'Jump to the next pane waiting for you',    'CMD+SHIFT+A',  'Navigation'),
 
   // General
   SEARCH_HISTORY:   cmd('Search History',     'Search command history',                   'CMD+SHIFT+R',  'General'),
@@ -163,7 +189,14 @@ export const CMD = {
   CLEAR_TERMINAL:   cmd('Clear Terminal',     'Clear the active terminal',                'CMD+L',        'General'),
   FIND:             cmd('Find',               'Search this pane\'s scrollback',            'CMD+F',        'General'),
   REVEAL_LOGS:      cmd('Reveal Logs',        'Show the app log file in Finder',          '',             'General'),
+  REVEAL_FOLDER:    cmd('Reveal Folder in Finder', 'Show this pane\'s directory in Finder', 'CMD+SHIFT+O', 'General'),
+  OPEN_FOLDER:      cmd('Open Folder in Editor',   'Open this pane\'s directory in your editor', '',       'General'),
+  RECORD_TRANSCRIPT: cmd('Record Transcript', 'Write everything this pane prints to a file', '',          'General'),
   CREATE_COMMAND:   cmd('Create Command',     'Create a custom command',                  'CMD+SHIFT+C',  'Commands'),
+
+  // Workspaces
+  SAVE_WORKSPACE:   cmd('Save Workspace…',    'Store this window\'s tabs and panes by name', '',           'Workspaces'),
+  OPEN_WORKSPACE:   cmd('Open Workspace…',    'Rebuild the window from a saved workspace', '',            'Workspaces'),
 
   // Appearance
   ZOOM_IN:          cmd('Zoom In',            'Increase the terminal font size',          'CMD+=',        'Appearance'),
@@ -199,6 +232,9 @@ export const BUILT_IN_SHORTCUTS: Record<string, string> = {
   'cmd+|': CMD.SPLIT_VERTICAL.name,
   'cmd+shift+d': CMD.SPLIT_HORIZONTAL.name,
   'cmd+shift+x': CMD.CLOSE_PANE.name,
+  'cmd+shift+enter': CMD.ZOOM_PANE.name,
+  'cmd+shift+a': CMD.NEXT_ATTENTION.name,
+  'cmd+shift+o': CMD.REVEAL_FOLDER.name,
   'cmd+l': CMD.CLEAR_TERMINAL.name,
   'cmd+f': CMD.FIND.name,
   'cmd+g': 'Find Next',

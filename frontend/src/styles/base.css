@@ -113,6 +113,7 @@ html, body {
 #status-overlay:not(.hidden),
 #ai-overlay:not(.hidden),
 #history-overlay:not(.hidden),
+#workspace-overlay:not(.hidden),
 #wizard-overlay:not(.hidden),
 #theme-wizard-overlay:not(.hidden) {
   animation: overlayFadeIn 0.15s ease-out;
@@ -123,6 +124,7 @@ html, body {
 .status-modal-box,
 .ai-box,
 .history-box,
+.workspace-box,
 .wizard-box,
 .theme-wizard-box,
 .update-dialog,
@@ -135,6 +137,7 @@ html, body {
 .status-modal-box::after,
 .ai-box::after,
 .history-box::after,
+.workspace-box::after,
 .wizard-box::after,
 .theme-wizard-box::after,
 .update-dialog::after,

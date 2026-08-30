@@ -1,4 +1,3 @@
-APP_NAME = ElTerminalo
 BINARY = elterminalo
 
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo "0.1.0")
@@ -6,7 +5,7 @@ VERSION ?= $(shell cat VERSION 2>/dev/null || echo "0.1.0")
 # CGo flags for llama.cpp Metal support on macOS
 export CGO_LDFLAGS = -framework Accelerate -framework Foundation -framework Metal -framework MetalKit -framework MetalPerformanceShaders
 
-.PHONY: build run app clean dev lint test release setup-llm clean-llm
+.PHONY: build run clean dev lint test release setup-llm clean-llm
 
 # go-llama.cpp is consumed through a local `replace` in go.mod, so whatever is
 # checked out in deps/ *is* the dependency. It must be pinned.
@@ -66,9 +65,6 @@ build: setup-llm
 run: build
 	./build/bin/$(BINARY)
 
-app:
-	./scripts/build-app.sh
-
 lint:
 	golangci-lint run ./...
 	cd frontend && npx tsc --noEmit
@@ -79,8 +75,15 @@ test:
 release:
 	./scripts/release.sh $(VERSION)
 
+# build/bin and release/ are the only outputs. There used to be a third — a
+# hand-rolled ElTerminalo.app at the repo root, made by an `app` target — and it
+# is gone along with the target: it registered a second bundle identifier with
+# LaunchServices and launched the binary inside Terminal.app via AppleScript, so
+# every privacy prompt it provoked was attributed to Terminal and answered
+# against Terminal's TCC grants rather than this app's. `wails build` produces
+# the only bundle this project has.
 clean:
-	rm -rf build/bin release $(APP_NAME).app
+	rm -rf build/bin release
 
 clean-llm:
 	rm -rf deps/go-llama.cpp

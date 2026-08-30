@@ -74,7 +74,10 @@
   box-shadow: inset -2px 0 0 0 var(--border-active);
 }
 
-/* A background tab whose shell rang the bell, until it is next activated. */
+/* A tab holding a pane that is waiting for the user — a bell, an OSC 9 or an
+   OSC 777 notification that arrived while they were looking elsewhere. Filled,
+   round, and at the tab's *leading* edge: it is about the user, so it comes
+   before even the tab's number. Cleared pane by pane, as each is focused. */
 .tab-attention {
   width: 6px;
   height: 6px;
@@ -82,6 +85,35 @@
   background: var(--accent);
   flex-shrink: 0;
   box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+/* What the tab's shells are *doing*, read off the OSC 133 marks. The trailing
+   edge, after the name, where progress belongs — and square rather than round,
+   so the two dots are never mistaken for each other at a glance. */
+.tab-status {
+  width: 5px;
+  height: 5px;
+  border-radius: 0;
+  flex-shrink: 0;
+}
+
+.tab-status.is-running {
+  background: var(--accent);
+  animation: tabStatusPulse 1.4s ease-in-out infinite;
+}
+
+.tab-status.is-done {
+  background: #56d364;
+}
+
+.tab-status.is-failed {
+  background: #f85149;
+  box-shadow: 0 0 6px rgba(248, 81, 73, 0.5);
+}
+
+@keyframes tabStatusPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 .tab-item:hover {

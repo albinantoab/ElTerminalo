@@ -1,0 +1,90 @@
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <key>CFBundlePackageType</key>
+        <string>APPL</string>
+        <key>CFBundleName</key>
+        <string>{{.Info.ProductName}}</string>
+        <key>CFBundleExecutable</key>
+        <string>{{.OutputFilename}}</string>
+        <!-- The same identifier as Info.plist, so a `wails dev` build sees the
+             TCC grants the installed app was given instead of prompting for
+             every folder again. It is load-bearing for those grants — see
+             Info.plist for what changing it costs. -->
+        <key>CFBundleIdentifier</key>
+        <string>com.albinanto.elterminalo</string>
+        <key>CFBundleVersion</key>
+        <string>{{.Info.ProductVersion}}</string>
+        <key>CFBundleGetInfoString</key>
+        <string>{{.Info.Comments}}</string>
+        <key>CFBundleShortVersionString</key>
+        <string>{{.Info.ProductVersion}}</string>
+        <key>CFBundleIconFile</key>
+        <string>iconfile</string>
+        <!-- Keep in sync with Info.plist: the Go toolchain stamps minos 12.0
+             into the binary either way, so anything lower here is a claim the
+             build cannot keep. -->
+        <key>LSMinimumSystemVersion</key>
+        <string>12.0</string>
+        <key>NSHighResolutionCapable</key>
+        <string>true</string>
+        <key>NSHumanReadableCopyright</key>
+        <string>{{.Info.Copyright}}</string>
+        <!-- Privacy usage strings — keep in sync with Info.plist so `wails dev`
+             builds can prompt for TCC-protected folders instead of failing with
+             EPERM. See Info.plist for the rationale. -->
+        <key>NSDesktopFolderUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files on your Desktop.</string>
+        <key>NSDocumentsFolderUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files in your Documents folder.</string>
+        <key>NSDownloadsFolderUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files in your Downloads folder.</string>
+        <key>NSRemovableVolumesUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files on removable volumes.</string>
+        <key>NSNetworkVolumesUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files on network volumes.</string>
+        <key>NSFileProviderDomainUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files synced by iCloud Drive and other file providers.</string>
+        {{if .Info.FileAssociations}}
+        <key>CFBundleDocumentTypes</key>
+        <array>
+          {{range .Info.FileAssociations}}
+          <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+              <string>{{.Ext}}</string>
+            </array>
+            <key>CFBundleTypeName</key>
+            <string>{{.Name}}</string>
+            <key>CFBundleTypeRole</key>
+            <string>{{.Role}}</string>
+            <key>CFBundleTypeIconFile</key>
+            <string>{{.IconName}}</string>
+          </dict>
+          {{end}}
+        </array>
+        {{end}}
+        {{if .Info.Protocols}}
+        <key>CFBundleURLTypes</key>
+        <array>
+          {{range .Info.Protocols}}
+            <dict>
+                <key>CFBundleURLName</key>
+                <string>com.albinanto.elterminalo.{{.Scheme}}</string>
+                <key>CFBundleURLSchemes</key>
+                <array>
+                    <string>{{.Scheme}}</string>
+                </array>
+                <key>CFBundleTypeRole</key>
+                <string>{{.Role}}</string>
+            </dict>
+          {{end}}
+        </array>
+        {{end}}
+        <key>NSAppTransportSecurity</key>
+        <dict>
+            <key>NSAllowsLocalNetworking</key>
+            <true/>
+        </dict>
+    </dict>
+</plist>

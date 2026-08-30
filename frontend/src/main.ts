@@ -1,7 +1,10 @@
 import { TerminalPane, setLocalHostname } from './terminal/TerminalPane';
 import type { PaneOptions } from './terminal/TerminalPane';
 import { AppTheme, themeFromDTO, applyThemeToCSS } from './theme/themes';
-import { PaneInfo, SplitNode, Tab, SavedSplitNode, SavedState, SavedTab, CustomCommand, PaletteCommand } from './types';
+import {
+  PaneInfo, SplitNode, Tab, SavedSplitNode, SavedState, SavedTab, CustomCommand,
+  PaletteCommand, CommandStatus,
+} from './types';
 import { CommandPalette } from './palette/CommandPalette';
 import { CommandWizard } from './wizard/CommandWizard';
 import { ThemeWizard } from './wizard/ThemeWizard';
@@ -10,6 +13,7 @@ import { StatusModal } from './status/StatusModal';
 import { AskAI } from './ai/AskAI';
 import { HistoryModal } from './history/HistoryModal';
 import { FindBar } from './find/FindBar';
+import { WorkspaceModal } from './workspace/WorkspaceModal';
 import { escHtml, generateId, waitForLayout, utf8ToBase64 } from './utils';
 import {
   MAX_TABS, DOUBLE_CLICK_DELAY_MS, MIN_SPLIT_RATIO, MAX_SPLIT_RATIO,
@@ -18,11 +22,13 @@ import {
   SETTINGS_FONT_SIZE_MIN, SETTINGS_FONT_SIZE_MAX, MENU_ACTION_DEDUP_MS,
   TITLE_REFRESH_DEBOUNCE_MS, BELL_FLASH_MS, BELL_COALESCE_MS, TAB_DRAG_MIME,
   MODAL_PASSTHROUGH_META_KEYS, DEFAULT_SETTINGS, CMD,
+  DOCK_BADGE_DEBOUNCE_MS, NOTIFY_PER_PANE_MS, NOTIFY_BURST_MAX, NOTIFY_BURST_WINDOW_MS,
 } from './constants';
 import { logError, logInfo } from './log';
 import './types/wails.d.ts';
 import type {
   PtyExitPayload, FilesDroppedPayload, Settings, MenuActionPayload, ThemesChangedPayload,
+  NotificationActivatedPayload, TranscriptStoppedPayload,
 } from './types/wails.d.ts';
 
 /** Cancel the webview's own drag and drop, from the moment the page exists.
@@ -111,6 +117,13 @@ function basename(path: string): string {
   return trimmed.slice(trimmed.lastIndexOf('/') + 1) || '/';
 }
 
+/** What a tab's trailing status dot says when hovered. */
+const STATUS_TITLE: Record<Exclude<CommandStatus, 'idle'>, string> = {
+  running: 'A command is running',
+  done: 'A command finished',
+  failed: 'A command failed',
+};
+
 const CURSOR_STYLES: readonly Settings['cursorStyle'][] = ['block', 'underline', 'bar'];
 const BELL_MODES: readonly Settings['bell'][] = ['none', 'sound', 'visual', 'both'];
 const QUIT_MODES: readonly Settings['confirmQuit'][] = ['running', 'always', 'never'];
@@ -189,6 +202,27 @@ class ElTerminalo {
   private bellLastAt = new WeakMap<HTMLElement, number>();
   // The tab being dragged along the tab bar, or -1.
   private draggingTabIndex = -1;
+  // Whether this window has the keyboard. A pane the user is looking at is not
+  // one that needs their attention — and only a window they are *not* looking
+  // at is worth a native banner.
+  private windowFocused = true;
+  // Whether the OS has said it will show a notification. Only ever cached as
+  // `true`: authorization is granted asynchronously, on a system queue, and
+  // nothing tells the frontend when it lands — so a `false` is "not yet",
+  // re-asked by postNotification() rather than latched. See there.
+  private notificationsReady = false;
+  // Whether there is a notification binding to call at all. A different, and
+  // permanent, condition: a frontend running against a backend that has no
+  // Notify() cannot grow one mid-session, so that one *is* a latch.
+  private notificationsUnavailable = false;
+  // The debounce behind SetDockBadge, and the last label actually sent, so a
+  // burst of finishing commands is one call and an unchanged count is none.
+  private dockBadgeTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastDockBadge = '';
+  // When the last few native notifications went out, newest last. The overall
+  // rate limit: NOTIFY_BURST_MAX inside NOTIFY_BURST_WINDOW_MS, whichever panes
+  // they came from. (The per-pane limit lives on PaneInfo.lastNotifyAt.)
+  private notifyBurst: number[] = [];
 
   private container!: HTMLElement;
   private tabBar!: HTMLElement;
@@ -201,6 +235,7 @@ class ElTerminalo {
   private statusModal!: StatusModal;
   private askAI!: AskAI;
   private historyModal!: HistoryModal;
+  private workspaceModal!: WorkspaceModal;
   private aiGenerating = false;
   private aiPrompts = new Set<string>();
   private modelUpdateAvailable = false;
@@ -220,6 +255,9 @@ class ElTerminalo {
   private onVisibilityChange = () => {
     if (!document.hidden) {
       this.focusActivePane();
+      // Back on screen: whatever the pane in front of them was waiting to say,
+      // they are now looking at it.
+      this.clearAttention(this.panes[this.activeIndex]);
       // After macOS sleep/lock the timer never fires, but visibilitychange
       // does once the user comes back. Backend throttles to once per 24h, so
       // calling on every visibility-restore is cheap.
@@ -227,11 +265,17 @@ class ElTerminalo {
     }
   };
   private onWindowFocus = () => {
+    this.windowFocused = true;
     document.body.classList.remove('app-blurred');
     this.focusActivePane();
+    // Same as above: the pane they are now looking at has been seen. Without
+    // this, attention raised while the window was in the background would stay
+    // on the pane that is already active — nothing is going to "become" active.
+    this.clearAttention(this.panes[this.activeIndex]);
     this.checkForUpdate();
   };
   private onWindowBlur = () => {
+    this.windowFocused = false;
     document.body.classList.add('app-blurred');
   };
   private onBeforeUnload = () => {
@@ -331,6 +375,16 @@ class ElTerminalo {
       focusActivePane: () => this.focusActivePane(),
     });
 
+    const workspaceOverlay = document.getElementById('workspace-overlay')!;
+    this.workspaceModal = new WorkspaceModal(workspaceOverlay, {
+      getDefaultName: () => this.tab ? this.tabDisplayName(this.tab, this.activeTabIndex) : 'Workspace',
+      focusActivePane: () => this.focusActivePane(),
+      onSave: (name) => this.saveWorkspace(name),
+      onOpen: (slug) => this.openWorkspace(slug),
+      notice: (text) => this.notice(text),
+      confirm: (title, body, label, onConfirm) => this.showConfirmDialog(title, body, label, onConfirm),
+    });
+
     this.stateManager = new StateManager({
       getTabs: () => this.tabs,
       getActiveTabIndex: () => this.activeTabIndex,
@@ -427,6 +481,48 @@ class ElTerminalo {
       const name = typeof payload?.name === 'string' ? payload.name : '';
       this.refreshThemes(name).catch((e) => logError('Failed to reload the theme list', e));
     });
+
+    // The user clicked one of this app's notification banners. The key is the
+    // pane's own id, so the round trip lands exactly where it started —
+    // switching tab first, and doing nothing at all for a pane that has since
+    // been closed.
+    // A recording the backend gave up on — the 256 MiB cap, or a file it could
+    // not write. Without this the pane keeps a pulsing recording marker and the
+    // next toggle claims to have saved a file that stopped hours ago.
+    window.runtime.EventsOn('transcript:stopped', (payload?: TranscriptStoppedPayload) => {
+      const sid = typeof payload?.sessionID === 'string' ? payload.sessionID : '';
+      if (!sid) return;
+      const info = this.tabs.flatMap(t => t.panes).find(p => p.transcriptSessionId === sid);
+      if (!info) return;
+      const path = typeof payload?.path === 'string' ? payload.path : info.transcriptPath;
+      info.transcriptPath = '';
+      info.transcriptSessionId = '';
+      this.setMarkerVisible(info, 'recording', false);
+      const why = payload?.reason === 'cap'
+        ? 'it reached the 256 MiB limit'
+        : 'it could not be written';
+      info.pane.writeNotice(`[Recording stopped: ${why}. Saved to ${path}]`);
+      logInfo(`Transcript stopped by the backend (${payload?.reason ?? 'unknown'}): ${path}`);
+    });
+
+    window.runtime.EventsOn('notification:activated', (payload?: NotificationActivatedPayload) => {
+      const key = typeof payload?.paneKey === 'string' ? payload.paneKey : '';
+      if (key) this.focusPaneByKey(key);
+    });
+
+    // Asked here so the common case — permission granted on some earlier launch
+    // — is already known by the time anything wants a banner. A "no" is not an
+    // answer to keep: macOS resolves requestAuthorization on its own queue, and
+    // on first launch this question is asked *while the permission alert is
+    // still on screen*. postNotification() asks again whenever it is still
+    // holding a "no", which is what makes the session the user granted
+    // permission in the session it starts working in.
+    try {
+      this.notificationsReady = await window.go.main.App.NotificationsReady();
+    } catch {
+      this.notificationsReady = false;
+      logInfo('Could not ask whether notifications are authorized; asking again when there is one to post');
+    }
   }
 
   /** Read config.json through the backend, normalized and never rejecting: a
@@ -506,6 +602,7 @@ class ElTerminalo {
       || this.statusModal?.isOpen()
       || this.askAI?.isOpen()
       || this.historyModal?.isOpen()
+      || this.workspaceModal?.isOpen()
       || this.wizard?.isOpen()
       || this.themeWizard?.isOpen()
       // Covers the update prompt, the model download and the confirm dialogs:
@@ -621,6 +718,11 @@ class ElTerminalo {
     if (this.updateCheckInterval) { clearInterval(this.updateCheckInterval); this.updateCheckInterval = null; }
     if (this.statsInterval) { clearInterval(this.statsInterval); this.statsInterval = null; }
     if (this.titleRefreshTimer) { clearTimeout(this.titleRefreshTimer); this.titleRefreshTimer = null; }
+    if (this.dockBadgeTimer) { clearTimeout(this.dockBadgeTimer); this.dockBadgeTimer = null; }
+    // The window is going; a badge left on the Dock icon would outlive it.
+    try {
+      window.go.main.App.SetDockBadge('').catch(() => {});
+    } catch { /* a backend without the binding */ }
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     window.removeEventListener('focus', this.onWindowFocus);
     window.removeEventListener('blur', this.onWindowBlur);
@@ -753,10 +855,11 @@ class ElTerminalo {
       id: generateId('tab'),
       name: tabName,
       renamed: false,
-      attention: false,
+      finished: null,
       panes: [],
       activeIndex: 0,
       layoutRoot: null,
+      zoomedPaneId: null,
     };
     this.tabs.push(tab);
     this.activeTabIndex = this.tabs.length - 1;
@@ -792,9 +895,13 @@ class ElTerminalo {
     this.snapshotClosedTab(tab);
     if (this.findBar && tab.panes.some(p => p.pane === this.findBar!.pane)) this.closeFind();
     for (const p of tab.panes) {
+      this.stopTranscriptFor(p);
       p.pane.dispose();
+      p.needsAttention = false;
     }
     this.tabs.splice(index, 1);
+    // Those panes are gone, and with them whatever they were waiting to say.
+    this.scheduleDockBadge();
 
     // Closing a tab to the left of the active one shifts it down. Without this
     // the window would land on a different tab than the user was working in —
@@ -824,9 +931,15 @@ class ElTerminalo {
     // The bar belongs to a pane that is about to leave the screen.
     this.closeFind();
     const outgoing = this.tab;
+    // Zoom is a way of looking at one tab, not a state to come back to: a tab
+    // left while zoomed is a tab whose other panes have quietly disappeared.
+    if (outgoing) outgoing.zoomedPaneId = null;
     this.activeTabIndex = index;
-    // Whatever rang while this tab was in the background has now been seen.
-    this.tab.attention = false;
+    // Whatever finished in this tab while it was in the background has now been
+    // seen. (The per-pane attention flags are cleared one at a time, by the
+    // pane becoming active — see setActive.)
+    this.tab.finished = null;
+    this.tab.zoomedPaneId = null;
     // Release the outgoing tab's GPU contexts *before* the incoming tab asks
     // for its own. Browsers cap how many WebGL contexts are alive at once and
     // silently drop the oldest to make room; overlapping the two tabs would
@@ -852,13 +965,21 @@ class ElTerminalo {
     });
   }
 
-  /** Only the tab on screen holds WebGL contexts. Called after every render
+  /** Only the tab on screen holds WebGL contexts — and while that tab is
+   *  zoomed, only the one pane the zoom is showing. Called after every render
    *  that changes which panes are visible; both halves are idempotent, so it
-   *  is cheap to call whenever in doubt. */
+   *  is cheap to call whenever in doubt.
+   *
+   *  Zoom detaches every other pane in the tab, which is the same situation a
+   *  background tab is in and costs the same scarce, browser-wide resource:
+   *  without the second test a zoomed six-way split holds six contexts for one
+   *  visible pane, and re-attempts enableWebgl() on five detached terminals
+   *  every time this runs. */
   private syncWebgl(): void {
     for (const tab of this.tabs) {
-      const visible = tab === this.tab;
+      const onScreen = tab === this.tab;
       for (const p of tab.panes) {
+        const visible = onScreen && (!tab.zoomedPaneId || p.id === tab.zoomedPaneId);
         if (visible) p.pane.enableWebgl();
         else p.pane.disableWebgl();
       }
@@ -941,10 +1062,22 @@ class ElTerminalo {
           <input class="tab-rename-input" type="text" value="${escHtml(label)}" data-index="${i}" />
         </div>`;
       }
+      // Two dots, and they mean different things, so they sit at opposite ends
+      // of the tab. Attention — a pane that asked for the user — is a filled
+      // dot at the leading edge, ahead of even the tab's number, because it is
+      // about them. The command status dot trails the name, where a build's
+      // progress belongs.
+      const attention = this.tabNeedsAttention(t)
+        ? '<span class="tab-attention" title="A pane in this tab is waiting for you"></span>'
+        : '';
+      const status = this.tabStatus(t);
+      const statusDot = status === 'idle' ? ''
+        : `<span class="tab-status is-${status}" title="${STATUS_TITLE[status]}"></span>`;
       return `<div class="tab-item ${isActive ? 'active' : ''}" data-index="${i}" draggable="true">
+        ${attention}
         <span class="tab-shortcut">${i + 1}</span>
         <span class="tab-name">${escHtml(label)}</span>
-        ${t.attention ? '<span class="tab-attention" title="Bell"></span>' : ''}
+        ${statusDot}
         ${this.tabs.length > 1 ? `<span class="tab-close" data-close="${i}">×</span>` : ''}
       </div>`;
     }).join('');
@@ -1144,10 +1277,11 @@ class ElTerminalo {
       id: generateId('tab'),
       name: saved.name,
       renamed: !!saved.renamed,
-      attention: false,
+      finished: null,
       panes: [],
       activeIndex: 0,
       layoutRoot: null,
+      zoomedPaneId: null,
     };
     this.tabs.push(tab);
     this.activeTabIndex = this.tabs.length - 1;
@@ -1199,7 +1333,7 @@ class ElTerminalo {
       if (!state.tabs && state.layout) {
         // v1 migration: single layout -> single tab
         applyThemeToCSS(this.currentTheme);
-        const tab: Tab = { id: 'tab-migrated', name: 'Terminal', renamed: false, attention: false, panes: [], activeIndex: 0, layoutRoot: null };
+        const tab: Tab = { id: 'tab-migrated', name: 'Terminal', renamed: false, finished: null, panes: [], activeIndex: 0, layoutRoot: null, zoomedPaneId: null };
         this.tabs.push(tab);
         this.activeTabIndex = 0;
         tab.layoutRoot = await this.restoreLayoutNode(state.layout, tab);
@@ -1213,37 +1347,7 @@ class ElTerminalo {
 
       if (!state.tabs || state.tabs.length === 0) return false;
 
-      const theme = this.themes.find(t => t.name === state.themeName);
-      if (theme) this.currentTheme = theme;
-      applyThemeToCSS(this.currentTheme);
-
-      for (const savedTab of state.tabs) {
-        const tab: Tab = {
-          id: generateId('tab'),
-          name: savedTab.name,
-          // Absent in state written before this existed — and rightly false
-          // there, since those tabs were never renamed by hand.
-          renamed: !!savedTab.renamed,
-          attention: false,
-          panes: [],
-          activeIndex: 0,
-          layoutRoot: null,
-        };
-        this.tabs.push(tab);
-        // Per-leaf failures are absorbed below, so one unreadable directory
-        // can't take the rest of the layout down with it.
-        tab.layoutRoot = await this.restoreLayoutNode(savedTab.layout, tab);
-      }
-
-      this.activeTabIndex = Math.min(state.activeTabIndex || 0, this.tabs.length - 1);
-      this.renderTabBar();
-      this.renderLayout();
-      await waitForLayout();
-      for (const p of this.tab.panes) p.pane.fit();
-      // Every restored tab has its panes, but only the active one is on screen
-      // and only its panes may hold a GPU context — a seventeen-pane layout
-      // would otherwise ask for seventeen and lose most of them.
-      this.syncWebgl();
+      await this.buildWindowFromState(state);
 
       // Deliberately no save here: nothing changed from the user's point of
       // view, and the 30s autosave starts once init() is past this.
@@ -1268,6 +1372,48 @@ class ElTerminalo {
     } finally {
       this.restoring = false;
     }
+  }
+
+  /** Build every tab of a saved state and put the result on screen.
+   *
+   *  Shared by the launch-time restore and by opening a workspace, which are
+   *  the same operation reading from two different files — and which must stay
+   *  the same operation, or a workspace would come back subtly unlike the
+   *  window it was saved from. The caller owns the `restoring` guard, the
+   *  disposal of whatever was there before, and the save afterwards. */
+  private async buildWindowFromState(state: SavedState): Promise<void> {
+    const theme = this.themes.find(t => t.name === state.themeName);
+    if (theme) this.currentTheme = theme;
+    applyThemeToCSS(this.currentTheme);
+
+    for (const savedTab of state.tabs) {
+      const tab: Tab = {
+        id: generateId('tab'),
+        name: savedTab.name,
+        // Absent in state written before this existed — and rightly false
+        // there, since those tabs were never renamed by hand.
+        renamed: !!savedTab.renamed,
+        finished: null,
+        panes: [],
+        activeIndex: 0,
+        layoutRoot: null,
+        zoomedPaneId: null,
+      };
+      this.tabs.push(tab);
+      // Per-leaf failures are absorbed by restoreLayoutNode, so one unreadable
+      // directory can't take the rest of the layout down with it.
+      tab.layoutRoot = await this.restoreLayoutNode(savedTab.layout, tab);
+    }
+
+    this.activeTabIndex = Math.min(Math.max(0, state.activeTabIndex || 0), this.tabs.length - 1);
+    this.renderTabBar();
+    this.renderLayout();
+    await waitForLayout();
+    for (const p of this.tab.panes) p.pane.fit();
+    // Every restored tab has its panes, but only the active one is on screen
+    // and only its panes may hold a GPU context — a seventeen-pane layout
+    // would otherwise ask for seventeen and lose most of them.
+    this.syncWebgl();
   }
 
   /** Say, in the fallback tab's terminal, that the old layout was set aside —
@@ -1312,9 +1458,28 @@ class ElTerminalo {
 
     // A new pane is never the active one yet — setActive() turns its cursor on
     // a moment later — so it is built with the blink off.
+    // The corner markers: a pane that is waiting for the user, and a pane that
+    // is recording a transcript. Their own layer over the terminal, rather than
+    // a pseudo-element on the leaf, because the leaf's ::before and ::after are
+    // already the active-pane brackets and the AI glow.
+    const markers = document.createElement('div');
+    markers.className = 'pane-markers';
+    markers.innerHTML =
+      '<span class="pane-marker pane-marker-recording" title="Recording a transcript" hidden></span>'
+      + '<span class="pane-marker pane-marker-attention" title="Waiting for you" hidden></span>';
+    el.appendChild(markers);
+
     const pane = new TerminalPane(el, this.currentTheme.xterm, this.paneOptions(false));
     const id = generateId('pane');
-    const info: PaneInfo = { id, pane, element: el };
+    const info: PaneInfo = {
+      id, pane, element: el,
+      needsAttention: false,
+      attentionTitle: '',
+      attentionBody: '',
+      lastNotifyAt: 0,
+      transcriptPath: '',
+      transcriptSessionId: '',
+    };
 
     pane.setContextActions({
       splitVertical: () => this.splitPane('vertical'),
@@ -1325,6 +1490,26 @@ class ElTerminalo {
     pane.onExit = (exit) => this.handlePaneExit(info, exit);
 
     pane.onBell = () => this.handleBell(info, tab);
+
+    // OSC 9 / OSC 777: the shell asking for the user by name. Unlike the bell
+    // this has nothing to do with the `bell` setting — a program that posts a
+    // notification has said what it wants, and there is no sound or flash in
+    // it to be turned off.
+    pane.onNotify = (title, body) => {
+      this.raiseAttention(info, tab, title, body || 'Notification');
+    };
+
+    // The tab's status dot is driven by this pane's OSC 133 marks, not by
+    // polling. A finish in a tab the user is not looking at is what the tab
+    // remembers until they visit it.
+    pane.shellIntegration.onStatusChangeAdd((status) => {
+      if ((status === 'done' || status === 'failed') && tab !== this.tab) {
+        // 'failed' outranks 'done': one broken command in a tab full of
+        // finished ones is the thing worth going back for.
+        if (status === 'failed' || tab.finished === null) tab.finished = status;
+      }
+      this.scheduleTitleRefresh();
+    });
 
     // OSC 0/2 titles and OSC 7 directories both feed the tab's name, and both
     // arrive on every prompt.
@@ -1382,6 +1567,9 @@ class ElTerminalo {
     if (!this.layoutRoot) return;
     const activePane = this.panes[this.activeIndex];
     if (!activePane) return;
+    // A split is a request to see two panes at once, which is the opposite of
+    // what zoom is for. The renderLayout() below draws the whole tree again.
+    if (this.tab) this.tab.zoomedPaneId = null;
 
     const newPane = await this.createPane();
     const replaceInTree = (node: SplitNode): SplitNode => {
@@ -1498,7 +1686,12 @@ class ElTerminalo {
     const removedIdx = tab.panes.indexOf(target);
     tab.panes.splice(removedIdx, 1);
     if (this.findBar?.pane === target.pane) this.closeFind();
+    // Closing the zoomed pane — or any pane while zoomed — puts the tab back
+    // together rather than leaving it showing a pane that is gone.
+    tab.zoomedPaneId = null;
+    this.stopTranscriptFor(target);
     target.pane.dispose();
+    this.forgetAttention(target);
 
     // Keep the focus where it was: everything after the hole shifts down one.
     if (removedIdx < tab.activeIndex) tab.activeIndex--;
@@ -1508,7 +1701,13 @@ class ElTerminalo {
     // Background tabs aren't in the DOM; switchToTab redraws them on return.
     if (tabIndex === this.activeTabIndex) {
       this.renderLayout();
-      requestAnimationFrame(() => this.fitAll());
+      requestAnimationFrame(() => {
+        this.fitAll();
+        // Closing any pane while zoomed puts the whole tab back on screen —
+        // see the zoomedPaneId reset above — and the panes the zoom had
+        // detached need their GPU contexts back.
+        this.syncWebgl();
+      });
       this.setActive(tab.activeIndex);
     }
     this.stateManager.save();
@@ -1519,6 +1718,10 @@ class ElTerminalo {
    *  so it goes; anything else is a failure they should see, so the pane stays
    *  with the reason on screen and Enter to restart it. */
   private handlePaneExit(info: PaneInfo, exit: PtyExitPayload): void {
+    // The session being recorded is over, whatever happens to the pane: a
+    // restart from Enter opens a different one, and the backend is still
+    // holding the file open for this one.
+    this.stopTranscriptFor(info);
     const clean = exit.exitCode === 0 && exit.signal === '';
     // Mid-restore the layout isn't assembled yet, so nothing may be
     // restructured — the pane just says what happened and waits for Enter.
@@ -1529,7 +1732,78 @@ class ElTerminalo {
   private renderLayout(): void {
     this.container.innerHTML = '';
     if (!this.layoutRoot) return;
+    // Zoom is a rendering decision and nothing else: the split tree is
+    // untouched, and the panes that are not on screen keep their shells,
+    // their scrollback and their sizes. Coming out of zoom re-renders the same
+    // tree that was there all along.
+    const zoomed = this.zoomedPane();
+    if (zoomed) {
+      zoomed.element.style.flex = '1';
+      this.container.appendChild(zoomed.element);
+      return;
+    }
     this.container.appendChild(this.renderNode(this.layoutRoot));
+  }
+
+  /** The visible tab's zoomed pane, or null — including when the id names a
+   *  pane that has since been closed. */
+  private zoomedPane(): PaneInfo | null {
+    const id = this.tab?.zoomedPaneId;
+    if (!id) return null;
+    const found = this.panes.find(p => p.id === id);
+    if (!found) {
+      this.tab.zoomedPaneId = null;
+      return null;
+    }
+    return found;
+  }
+
+  /** Cmd+Shift+Enter: the active pane fills the tab, or gives it back. */
+  private toggleZoom(): void {
+    const tab = this.tab;
+    if (!tab) return;
+    if (tab.zoomedPaneId) {
+      this.exitZoom();
+      return;
+    }
+    // Nothing to zoom into when the pane is already the whole tab.
+    if (tab.panes.length <= 1) return;
+    const active = tab.panes[tab.activeIndex];
+    if (!active) return;
+    // The bar belongs to a pane that may be about to leave the screen.
+    this.closeFind();
+    tab.zoomedPaneId = active.id;
+    this.renderLayout();
+    requestAnimationFrame(() => {
+      // A pane that has just gone from a quarter of the tab to all of it is a
+      // different size, and its shell has to be told. Font options set while a
+      // pane was hidden by the zoom were held back for the same reason a
+      // background tab's are — xterm cannot measure a detached cell box.
+      for (const p of this.panes) p.pane.flushOptions();
+      this.fitAll();
+      this.syncWebgl();
+      this.setActive(tab.panes.indexOf(active));
+      this.renderStatusBar();
+    });
+  }
+
+  /** Back to the split layout. A no-op when nothing is zoomed, so every caller
+   *  that merely *might* be leaving zoom can call it unconditionally. */
+  private exitZoom(): void {
+    const tab = this.tab;
+    if (!tab?.zoomedPaneId) return;
+    const zoomedId = tab.zoomedPaneId;
+    tab.zoomedPaneId = null;
+    this.closeFind();
+    this.renderLayout();
+    requestAnimationFrame(() => {
+      for (const p of this.panes) p.pane.flushOptions();
+      this.fitAll();
+      this.syncWebgl();
+      const idx = tab.panes.findIndex(p => p.id === zoomedId);
+      this.setActive(idx >= 0 ? idx : tab.activeIndex);
+      this.renderStatusBar();
+    });
   }
 
   private renderNode(node: SplitNode): HTMLElement {
@@ -1601,6 +1875,9 @@ class ElTerminalo {
     this.panes[index].element.classList.add('active');
     this.panes[index].pane.terminal.options.cursorBlink = this.settings.cursorBlink;
     this.panes[index].pane.focus();
+    // Whatever this pane was waiting to tell the user, they are now looking at
+    // it. (Also re-renders the tab bar and the badge.)
+    this.clearAttention(this.panes[index]);
     this.renderStatusBar();
     // The tab is named after this pane, and it just changed which pane that is.
     this.scheduleTitleRefresh();
@@ -1753,21 +2030,482 @@ class ElTerminalo {
     if (mode === 'sound' || mode === 'both') {
       window.go.main.App.Bell().catch(() => { /* a bell nobody hears is not an error */ });
     }
-    if (mode !== 'visual' && mode !== 'both') return;
 
-    const el = info.element;
-    el.classList.add('bell-flash');
-    const running = this.bellTimers.get(el);
-    if (running) clearTimeout(running);
-    this.bellTimers.set(el, setTimeout(() => {
-      this.bellTimers.delete(el);
-      el.classList.remove('bell-flash');
-    }, BELL_FLASH_MS));
-
-    if (tab !== this.tab && !tab.attention) {
-      tab.attention = true;
-      this.renderTabBar();
+    if (mode === 'visual' || mode === 'both') {
+      const el = info.element;
+      el.classList.add('bell-flash');
+      const running = this.bellTimers.get(el);
+      if (running) clearTimeout(running);
+      this.bellTimers.set(el, setTimeout(() => {
+        this.bellTimers.delete(el);
+        el.classList.remove('bell-flash');
+      }, BELL_FLASH_MS));
     }
+
+    // Whatever the bell sounds like, it *means* the same thing in every mode
+    // but 'none': something in that pane wants the user. The flash is for the
+    // pane they can see; this is for the one they cannot.
+    this.raiseAttention(info, tab, '', 'Command finished');
+  }
+
+  // --- Attention ---
+
+  /** A pane asked for the user. Whether that is worth saying anything about
+   *  depends entirely on where the user is looking.
+   *
+   *  The one pane that never raises attention is the one being watched: the
+   *  active pane of the visible tab, in a focused window, on a visible page. An
+   *  event there is something the user is already watching happen, and a badge
+   *  for it would be the app telling them what is on their own screen. Every
+   *  other pane — a background tab, a split they are not in, any pane at all
+   *  while the app is behind another window — gets the flag, and with it the
+   *  tab dot, the corner marker, the Dock badge and (only from a window that
+   *  does not have the keyboard) a native banner. */
+  private raiseAttention(info: PaneInfo, tab: Tab, title: string, body: string): void {
+    if (this.isWatching(info, tab)) return;
+
+    info.attentionTitle = title;
+    info.attentionBody = body;
+    // Everything below is about the *count* changing. A pane that is already
+    // waiting has already lit every surface there is; a shell spraying OSC 9
+    // must not cost a tab-bar rebuild per sequence.
+    if (!info.needsAttention) {
+      info.needsAttention = true;
+      info.element.classList.add('needs-attention');
+      this.setMarkerVisible(info, 'attention', true);
+      // Debounced, and skipped outright while a tab is being renamed: a dot is
+      // never worth replacing the input the user is typing into.
+      this.scheduleTitleRefresh();
+      this.scheduleDockBadge();
+      this.renderStatusBar();
+    }
+    // Fire and forget: it is the one attention surface that has to ask the OS a
+    // question first, and nothing above it waits on the answer.
+    void this.postNotification(info, tab);
+  }
+
+  /** True when this pane is the one the user is actually looking at. */
+  private isWatching(info: PaneInfo, tab: Tab): boolean {
+    return tab === this.tab
+      && tab.panes[tab.activeIndex] === info
+      && this.windowFocused
+      && !document.hidden;
+  }
+
+  /** This pane has been seen. Called when it becomes the active one, and when
+   *  the window comes back to a pane that was already active. */
+  private clearAttention(info: PaneInfo | undefined): void {
+    if (!info?.needsAttention) return;
+    info.needsAttention = false;
+    info.element.classList.remove('needs-attention');
+    this.setMarkerVisible(info, 'attention', false);
+    this.scheduleTitleRefresh();
+    this.scheduleDockBadge();
+    this.renderStatusBar();
+  }
+
+  /** A pane is going away. Nothing is left to focus, so the flag is simply
+   *  dropped and everything counting it told. */
+  private forgetAttention(info: PaneInfo): void {
+    info.needsAttention = false;
+    this.scheduleTitleRefresh();
+    this.scheduleDockBadge();
+    this.renderStatusBar();
+  }
+
+  private tabNeedsAttention(tab: Tab): boolean {
+    return tab.panes.some(p => p.needsAttention);
+  }
+
+  /** What this tab's trailing dot says. Running beats everything — it is the
+   *  only one that is still true right now; otherwise it is whatever finished
+   *  here since the user last looked, which switchToTab clears. */
+  private tabStatus(tab: Tab): CommandStatus {
+    if (tab.panes.some(p => p.pane.shellIntegration.getStatus() === 'running')) return 'running';
+    return tab.finished ?? 'idle';
+  }
+
+  private attentionCount(): number {
+    let n = 0;
+    for (const tab of this.tabs) for (const p of tab.panes) if (p.needsAttention) n++;
+    return n;
+  }
+
+  private setMarkerVisible(info: PaneInfo, kind: 'attention' | 'recording', visible: boolean): void {
+    const el = info.element.querySelector(`.pane-marker-${kind}`) as HTMLElement | null;
+    if (el) el.hidden = !visible;
+  }
+
+  /** The Dock badge is the count of panes waiting, across every tab. Debounced
+   *  because a build finishing in four panes at once is one number, not four
+   *  binding calls on the way to it. */
+  private scheduleDockBadge(): void {
+    if (this.dockBadgeTimer) return;
+    this.dockBadgeTimer = setTimeout(() => {
+      this.dockBadgeTimer = null;
+      const count = this.attentionCount();
+      const label = count > 0 ? String(count) : '';
+      if (label === this.lastDockBadge) return;
+      this.lastDockBadge = label;
+      try {
+        window.go.main.App.SetDockBadge(label).catch(() => { /* cosmetic */ });
+      } catch {
+        // A backend without the binding. The badge is the one surface the app
+        // cannot draw itself, and its absence changes nothing else.
+      }
+    }, DOCK_BADGE_DEBOUNCE_MS);
+  }
+
+  /** Post a native banner for a pane that is waiting — but only from a window
+   *  the user is not in, and only within both rate limits: one per pane per
+   *  NOTIFY_PER_PANE_MS, and NOTIFY_BURST_MAX per second overall.
+   *
+   *  Whether the OS is willing to show one is asked again every time the answer
+   *  so far is "no", which is the whole reason this is async. macOS answers
+   *  requestAuthorization on a system queue, seconds later, and tells nobody:
+   *  on first launch the alert is still on screen while init() asks, so a flag
+   *  latched there stays false for the whole of the session the user granted
+   *  permission in — and every later launch is a race against the same queue. A
+   *  `true` is cached because it cannot turn back into a "no"; a `false` costs
+   *  one binding call — a microsecond — per banner that wants posting.
+   *
+   *  A missing binding is the one condition that does latch: see
+   *  `notificationsUnavailable`. */
+  private async postNotification(info: PaneInfo, tab: Tab): Promise<void> {
+    if (this.notificationsUnavailable) return;
+    // A window with the keyboard shows all this on screen already.
+    if (this.windowFocused && !document.hidden) return;
+
+    if (!this.notificationsReady) {
+      try {
+        this.notificationsReady = await window.go.main.App.NotificationsReady();
+      } catch {
+        // Not "not authorized yet" — no amount of asking again fixes a binding
+        // that is not there.
+        this.notificationsUnavailable = true;
+        logInfo('Native notifications are unavailable; attention is shown in the window only');
+        return;
+      }
+      if (!this.notificationsReady) return;
+      // The await above is this function's only suspension point, and the user
+      // can have come back to the window across it — in which case they are
+      // looking at the very thing a banner would be telling them about.
+      if (this.windowFocused && !document.hidden) return;
+    }
+
+    const now = performance.now();
+    if (info.lastNotifyAt && now - info.lastNotifyAt < NOTIFY_PER_PANE_MS) return;
+    this.notifyBurst = this.notifyBurst.filter(t => now - t < NOTIFY_BURST_WINDOW_MS);
+    if (this.notifyBurst.length >= NOTIFY_BURST_MAX) return;
+
+    const tabIndex = this.tabs.indexOf(tab);
+    const paneIndex = tab.panes.indexOf(info);
+    const tabName = this.tabDisplayName(tab, tabIndex < 0 ? 0 : tabIndex);
+    // The shell's own title where it gave one; otherwise the pane's address in
+    // this window, which is what the user needs to find it again.
+    const title = info.attentionTitle
+      || (tab.panes.length > 1 ? `${tabName} · Pane ${String.fromCharCode(65 + Math.max(0, paneIndex))}` : tabName);
+
+    info.lastNotifyAt = now;
+    this.notifyBurst.push(now);
+    try {
+      window.go.main.App.Notify(title, info.attentionBody, info.id).catch(() => {
+        // Denied, or the notification centre is not taking any; the in-window
+        // surfaces have already said the same thing.
+      });
+    } catch {
+      // A backend without the binding: stop asking for the rest of the session.
+      this.notificationsUnavailable = true;
+    }
+  }
+
+  /** Cmd+Shift+A, and the `next-attention` menu item: go to the next pane that
+   *  is waiting, in tab order, wrapping — switching tabs as needed. */
+  private focusNextAttention(): void {
+    const flat: { tabIndex: number; paneIndex: number; info: PaneInfo }[] = [];
+    for (let ti = 0; ti < this.tabs.length; ti++) {
+      const panes = this.tabs[ti].panes;
+      for (let pi = 0; pi < panes.length; pi++) flat.push({ tabIndex: ti, paneIndex: pi, info: panes[pi] });
+    }
+    if (flat.length === 0) return;
+
+    // Start looking one past where the user is, so a second press moves on
+    // rather than landing on the same pane.
+    const here = flat.findIndex(e => e.tabIndex === this.activeTabIndex && e.paneIndex === this.activeIndex);
+    const from = here < 0 ? 0 : here + 1;
+    for (let i = 0; i < flat.length; i++) {
+      const entry = flat[(from + i) % flat.length];
+      if (!entry.info.needsAttention) continue;
+      if (entry.tabIndex !== this.activeTabIndex) {
+        // switchToTab drops the zoom itself, and re-fits and re-focuses on the
+        // next frame; the pane choice has to land after that or it would be
+        // overwritten by the tab's own.
+        this.switchToTab(entry.tabIndex);
+        requestAnimationFrame(() => this.setActive(entry.paneIndex));
+      } else {
+        this.activatePaneInTab(entry.paneIndex);
+      }
+      return;
+    }
+    this.notice('[No panes are waiting]');
+  }
+
+  /** Make one of the visible tab's panes the active one, leaving zoom first
+   *  when the pane asked for is not the one the zoom is showing.
+   *
+   *  setActive() on a detached pane moves `.active`, the cursor blink and the
+   *  app's whole notion of "the active pane" onto something that is not on
+   *  screen, while DOM focus stays behind on the pane that is. Coming out of
+   *  zoom re-renders the tree and, on the next frame, sets the active pane back
+   *  to the one that was zoomed — so the choice has to be made after that, the
+   *  same way it is after a tab switch. */
+  private activatePaneInTab(paneIndex: number): void {
+    const tab = this.tab;
+    const target = tab?.panes[paneIndex];
+    if (!tab || !target) return;
+    if (tab.zoomedPaneId && tab.zoomedPaneId !== target.id) {
+      this.exitZoom();
+      requestAnimationFrame(() => this.setActive(paneIndex));
+      return;
+    }
+    this.setActive(paneIndex);
+  }
+
+  /** A notification banner was clicked: go to the pane it was posted for. */
+  private focusPaneByKey(paneKey: string): void {
+    for (let ti = 0; ti < this.tabs.length; ti++) {
+      const pi = this.tabs[ti].panes.findIndex(p => p.id === paneKey);
+      if (pi < 0) continue;
+      if (ti !== this.activeTabIndex) {
+        this.switchToTab(ti);
+        requestAnimationFrame(() => this.setActive(pi));
+      } else {
+        this.activatePaneInTab(pi);
+      }
+      return;
+    }
+    // A pane closed between the banner and the click. Nothing to focus, and
+    // nothing worth saying to the user about it.
+    logInfo(`Notification named a pane that no longer exists (${paneKey})`);
+  }
+
+  // --- Transcripts ---
+
+  /** "Record Transcript" / "Stop Recording": everything this pane prints, into
+   *  a file, until it is switched off or the shell goes. */
+  private async toggleTranscript(): Promise<void> {
+    const info = this.panes[this.activeIndex];
+    if (!info) return;
+
+    if (info.transcriptPath) {
+      // The session id the recording was *started* for, not the pane's current
+      // one: a pane that restarted its shell is on a different session, and the
+      // backend still knows the old one as the one being written.
+      const sid = info.transcriptSessionId;
+      const path = info.transcriptPath;
+      info.transcriptPath = '';
+      info.transcriptSessionId = '';
+      this.setMarkerVisible(info, 'recording', false);
+      try {
+        await window.go.main.App.StopTranscript(sid);
+      } catch (e) {
+        logError('Failed to stop the transcript', e);
+        info.pane.writeNotice('[Could not stop the recording]');
+        return;
+      }
+      info.pane.writeNotice(`[Recording stopped; transcript saved to ${path}]`);
+      return;
+    }
+
+    const sid = info.pane.sessionId;
+    if (!sid) {
+      this.notice('[This pane has no shell to record]');
+      return;
+    }
+    try {
+      const path = await window.go.main.App.StartTranscript(sid);
+      if (!path) {
+        info.pane.writeNotice('[Could not start recording]');
+        return;
+      }
+      // The pane can be closed, or its shell exit, while the call is in flight.
+      if (info.pane.sessionId !== sid) {
+        window.go.main.App.StopTranscript(sid).catch(() => {});
+        return;
+      }
+      info.transcriptPath = path;
+      info.transcriptSessionId = sid;
+      this.setMarkerVisible(info, 'recording', true);
+      info.pane.writeNotice(`[Recording this pane to ${path}]`);
+    } catch (e) {
+      logError('Failed to start a transcript', e);
+      info.pane.writeNotice('[Could not start recording]');
+    }
+  }
+
+  /** Stop a pane's recording on its way out — a closed pane, or a shell that
+   *  exited. Fire and forget: there is nobody left to tell. */
+  private stopTranscriptFor(info: PaneInfo): void {
+    const sid = info.transcriptSessionId;
+    if (!sid) return;
+    info.transcriptPath = '';
+    info.transcriptSessionId = '';
+    this.setMarkerVisible(info, 'recording', false);
+    try {
+      window.go.main.App.StopTranscript(sid).catch(() => { /* already gone */ });
+    } catch { /* a backend without the binding */ }
+  }
+
+  /** Ask the backend whether the active pane is being recorded, so the palette
+   *  can offer "Stop Recording (name.log)" rather than guessing. Cheap, and
+   *  only ever called on the way into the palette. */
+  private async refreshActiveTranscript(): Promise<void> {
+    const info = this.panes[this.activeIndex];
+    if (!info?.pane.sessionId) return;
+    const sid = info.pane.sessionId;
+    try {
+      const path = await window.go.main.App.TranscriptPath(sid);
+      if (info.pane.sessionId !== sid) return;
+      info.transcriptPath = path || '';
+      info.transcriptSessionId = path ? sid : '';
+      this.setMarkerVisible(info, 'recording', !!path);
+    } catch {
+      // Leave what this window already believes; the toggle still works.
+    }
+  }
+
+  // --- Open here ---
+
+  /** Hand the active pane's directory to Finder or to the user's editor. */
+  private async openHere(where: 'finder' | 'editor'): Promise<void> {
+    const cwd = await this.getActivePaneCWD();
+    if (!cwd) {
+      this.notice('[This pane\'s folder is not known]');
+      return;
+    }
+    try {
+      if (where === 'finder') await window.go.main.App.RevealPath(cwd);
+      else await window.go.main.App.OpenPath(cwd);
+    } catch (e) {
+      logError(`Failed to open ${cwd} in ${where === 'finder' ? 'Finder' : 'the editor'}`, e);
+      this.notice(`[Could not open ${cwd}]`);
+    }
+  }
+
+  // --- Workspaces ---
+
+  /** Store this window under a name. The JSON is exactly what the autosave
+   *  writes, from the same serializer, so opening one is the restore path. */
+  private async saveWorkspace(name: string): Promise<void> {
+    const state = await this.stateManager.serializeState();
+    if (!state) {
+      this.notice('[There is nothing to save yet]');
+      return;
+    }
+    await window.go.main.App.SaveWorkspace(name, JSON.stringify(state));
+    this.notice(`[Workspace "${name}" saved]`);
+  }
+
+  /** Replace the whole window with a saved one — after asking.
+   *
+   *  Opening a workspace closes every shell in the window, which is more than
+   *  this app asks about for a single pane or a single tab, so it asks here
+   *  too. The question comes *after* the file has been read and found usable:
+   *  a workspace that cannot be opened must never put "your shells will be
+   *  closed" on screen, and answering Cancel then leave nothing to explain. */
+  private async openWorkspace(slug: string): Promise<void> {
+    // Not on top of another rebuild — a launch restore, a Cmd+Shift+T, or a
+    // second workspace chosen while this one is still connecting its panes.
+    if (this.restoring) return;
+
+    let json = '';
+    try {
+      json = await window.go.main.App.LoadWorkspace(slug);
+    } catch (e) {
+      logError(`Failed to read the workspace "${slug}"`, e);
+      this.notice('[That workspace could not be read]');
+      return;
+    }
+    let state: SavedState | null = null;
+    try {
+      state = json ? JSON.parse(json) as SavedState : null;
+    } catch (e) {
+      logError(`Workspace "${slug}" is not readable JSON`, e);
+    }
+    if (!state?.tabs?.length) {
+      this.notice('[That workspace has no tabs in it]');
+      return;
+    }
+    // A const, so the callback below keeps the narrowing this line was given.
+    const opening = state;
+
+    const paneCount = this.tabs.reduce((n, t) => n + t.panes.length, 0);
+    const tabCount = this.tabs.length;
+    this.showConfirmDialog(
+      'Open Workspace?',
+      `${paneCount} pane${paneCount === 1 ? '' : 's'} across ${tabCount} tab${tabCount === 1 ? '' : 's'}`
+      + ' will be closed. Cmd+Shift+T reopens them one at a time.',
+      'Open',
+      () => {
+        this.replaceWindowWith(slug, opening)
+          .catch(e => logError(`Failed to open the workspace "${slug}"`, e));
+      },
+    );
+  }
+
+  /** The destructive half of openWorkspace(), once the user has agreed to it.
+   *
+   *  The same shape as a launch-time restore, and for the same reasons: under
+   *  the `restoring` guard, so the autosave cannot write a half-built window
+   *  over the real state file; disposing the current tabs first, because their
+   *  shells are not coming back; and exactly one save at the end. */
+  private async replaceWindowWith(slug: string, state: SavedState): Promise<void> {
+    // The confirm dialog holds the keyboard but not the app's own machinery: a
+    // Cmd+Shift+T or a background shell's exit can have started a rebuild while
+    // the question was on screen.
+    if (this.restoring) return;
+
+    const previous = this.tabs;
+    this.restoring = true;
+    try {
+      this.closeFind();
+      this.tabs = [];
+      this.activeTabIndex = 0;
+      this.container.innerHTML = '';
+      for (const tab of previous) {
+        // The same courtesy Cmd+W gets, and for a much bigger loss: every tab
+        // this closes goes on the reopen stack first, so Cmd+Shift+T can bring
+        // them back. Before anything is disposed — the snapshot is built from
+        // the panes.
+        this.snapshotClosedTab(tab);
+        for (const p of tab.panes) {
+          this.stopTranscriptFor(p);
+          p.pane.dispose();
+          p.needsAttention = false;
+        }
+      }
+      await this.buildWindowFromState(state);
+    } catch (e) {
+      logError(`Failed to open the workspace "${slug}"`, e);
+    } finally {
+      this.restoring = false;
+    }
+
+    // Whatever went wrong, the window ends up with something in it.
+    if (this.tabs.length === 0) {
+      await this.createTab();
+      // Only now: notice() writes into the active pane of the active tab, and a
+      // moment ago there was neither — the message went nowhere and the user
+      // was left with a blank tab and no idea why.
+      this.notice('[That workspace could not be opened]');
+      // Those panes are gone whether or not the workspace opened, so the count
+      // on the Dock icon is stale either way.
+      this.scheduleDockBadge();
+      return;
+    }
+    this.setActive(this.tab.activeIndex);
+    this.scheduleDockBadge();
+    await this.stateManager.save();
   }
 
   // --- Find in scrollback ---
@@ -1831,10 +2569,21 @@ class ElTerminalo {
         + `</span>`;
     }
 
-    const leftSep = updateBadge && statsBadge ? '<span class="status-sep">|</span>' : '';
+    // The right-hand side is a fixed row of seven shortcut hints and is full.
+    // These two are states rather than hints — they are only there when they
+    // are true — so they go on the left, with the update badge and the stats.
+    const waiting = this.attentionCount();
+    const attentionBadge = waiting > 0
+      ? `<a class="status-attention" id="status-attention" title="${escHtml(CMD.NEXT_ATTENTION.shortcut)}">${waiting} waiting</a>`
+      : '';
+    const zoomBadge = this.tab?.zoomedPaneId
+      ? `<span class="status-zoom" title="${escHtml(CMD.ZOOM_PANE.shortcut)}">zoomed</span>`
+      : '';
+
+    const left = [updateBadge, attentionBadge, zoomBadge, statsBadge].filter(Boolean);
 
     this.statusbar.innerHTML = `
-      <div class="status-left">${updateBadge}${leftSep}${statsBadge}</div>
+      <div class="status-left">${left.join('<span class="status-sep">|</span>')}</div>
       <div class="status-right">
         <span class="status-key">${CMD.COMMAND_PALETTE.shortcut}</span><span class="status-label">cmds</span>
         <span class="status-sep">|</span>
@@ -1858,7 +2607,11 @@ class ElTerminalo {
         this.promptUpdate();
       });
     }
-
+    if (waiting > 0) {
+      document.getElementById('status-attention')?.addEventListener('click', () => {
+        this.focusNextAttention();
+      });
+    }
   }
 
   private async promptUpdate(): Promise<void> {
@@ -1917,6 +2670,8 @@ class ElTerminalo {
   }
 
   private getBuiltInCommands(): PaletteCommand[] {
+    // Refreshed on the way into the palette — see openPalette().
+    const transcriptPath = this.panes[this.activeIndex]?.transcriptPath || '';
     return [
       { name: CMD.NEW_TAB.name, desc: CMD.NEW_TAB.desc, category: CMD.NEW_TAB.category, shortcutDisplay: CMD.NEW_TAB.shortcut, action: () => this.createTab() },
       { name: CMD.CLOSE_TAB.name, desc: CMD.CLOSE_TAB.desc, category: CMD.CLOSE_TAB.category, shortcutDisplay: CMD.CLOSE_TAB.shortcut, action: () => this.confirmCloseTab(this.activeTabIndex) },
@@ -1929,8 +2684,10 @@ class ElTerminalo {
       { name: CMD.CLOSE_PANE.name, desc: CMD.CLOSE_PANE.desc, category: CMD.CLOSE_PANE.category, shortcutDisplay: CMD.CLOSE_PANE.shortcut, action: () => this.confirmCloseActivePane() },
       { name: CMD.NEXT_PANE.name, desc: CMD.NEXT_PANE.desc, category: CMD.NEXT_PANE.category, shortcutDisplay: CMD.NEXT_PANE.shortcut, action: () => this.navigateSpatial('right') },
       { name: CMD.PREV_PANE.name, desc: CMD.PREV_PANE.desc, category: CMD.PREV_PANE.category, shortcutDisplay: CMD.PREV_PANE.shortcut, action: () => this.navigateSpatial('left') },
+      { name: CMD.ZOOM_PANE.name, desc: CMD.ZOOM_PANE.desc, category: CMD.ZOOM_PANE.category, shortcutDisplay: CMD.ZOOM_PANE.shortcut, action: () => this.toggleZoom() },
       { name: CMD.NAV_PREV_COMMAND.name, desc: CMD.NAV_PREV_COMMAND.desc, category: CMD.NAV_PREV_COMMAND.category, shortcutDisplay: CMD.NAV_PREV_COMMAND.shortcut, action: () => { this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('prev'); } },
       { name: CMD.NAV_NEXT_COMMAND.name, desc: CMD.NAV_NEXT_COMMAND.desc, category: CMD.NAV_NEXT_COMMAND.category, shortcutDisplay: CMD.NAV_NEXT_COMMAND.shortcut, action: () => { this.panes[this.activeIndex]?.pane.shellIntegration.navigateToBlock('next'); } },
+      { name: CMD.NEXT_ATTENTION.name, desc: this.attentionCount() > 0 ? `${this.attentionCount()} pane${this.attentionCount() === 1 ? '' : 's'} waiting` : CMD.NEXT_ATTENTION.desc, category: CMD.NEXT_ATTENTION.category, shortcutDisplay: CMD.NEXT_ATTENTION.shortcut, action: () => this.focusNextAttention() },
       { name: CMD.SEARCH_HISTORY.name, desc: CMD.SEARCH_HISTORY.desc, category: CMD.SEARCH_HISTORY.category, shortcutDisplay: CMD.SEARCH_HISTORY.shortcut, action: () => { this.closePaletteIfOpen(); this.historyModal.show(); } },
       { name: CMD.AI_COMMAND.name, desc: CMD.AI_COMMAND.desc, category: CMD.AI_COMMAND.category, shortcutDisplay: CMD.AI_COMMAND.shortcut, action: () => { this.closePaletteIfOpen(); this.askAI.show(); } },
       ...(this.modelUpdateAvailable ? [{ name: CMD.UPDATE_MODEL.name, desc: CMD.UPDATE_MODEL.desc, category: CMD.UPDATE_MODEL.category, action: () => { this.closePaletteIfOpen(); this.handleModelDownload(); } }] : []),
@@ -1939,6 +2696,19 @@ class ElTerminalo {
       { name: CMD.CLEAR_TERMINAL.name, desc: CMD.CLEAR_TERMINAL.desc, category: CMD.CLEAR_TERMINAL.category, shortcutDisplay: CMD.CLEAR_TERMINAL.shortcut, action: () => this.clearActiveTerminal() },
       { name: CMD.FIND.name, desc: CMD.FIND.desc, category: CMD.FIND.category, shortcutDisplay: CMD.FIND.shortcut, action: () => { this.closePaletteIfOpen(); this.openFind(); } },
       { name: CMD.REVEAL_LOGS.name, desc: CMD.REVEAL_LOGS.desc, category: CMD.REVEAL_LOGS.category, action: () => { this.closePaletteIfOpen(); this.revealLogs(); } },
+      { name: CMD.REVEAL_FOLDER.name, desc: CMD.REVEAL_FOLDER.desc, category: CMD.REVEAL_FOLDER.category, shortcutDisplay: CMD.REVEAL_FOLDER.shortcut, action: () => { this.closePaletteIfOpen(); this.openHere('finder').catch(e => logError('Failed to reveal the folder', e)); } },
+      { name: CMD.OPEN_FOLDER.name, desc: CMD.OPEN_FOLDER.desc, category: CMD.OPEN_FOLDER.category, action: () => { this.closePaletteIfOpen(); this.openHere('editor').catch(e => logError('Failed to open the folder', e)); } },
+      // The label says what the entry will *do*, which is the opposite of the
+      // state it is in — and names the file, because "stop recording" is only
+      // reassuring if you can see what you were recording to.
+      {
+        name: transcriptPath ? `Stop Recording (${basename(transcriptPath)})` : CMD.RECORD_TRANSCRIPT.name,
+        desc: transcriptPath ? `Close ${transcriptPath}` : CMD.RECORD_TRANSCRIPT.desc,
+        category: CMD.RECORD_TRANSCRIPT.category,
+        action: () => { this.closePaletteIfOpen(); this.toggleTranscript().catch(e => logError('Failed to toggle the transcript', e)); },
+      },
+      { name: CMD.SAVE_WORKSPACE.name, desc: CMD.SAVE_WORKSPACE.desc, category: CMD.SAVE_WORKSPACE.category, action: () => { this.closePaletteIfOpen(); this.workspaceModal.show('save').catch(e => logError('Failed to open the workspace dialog', e)); } },
+      { name: CMD.OPEN_WORKSPACE.name, desc: CMD.OPEN_WORKSPACE.desc, category: CMD.OPEN_WORKSPACE.category, action: () => { this.closePaletteIfOpen(); this.workspaceModal.show('open').catch(e => logError('Failed to open the workspace dialog', e)); } },
       { name: CMD.COPY_LAST_OUTPUT.name, desc: CMD.COPY_LAST_OUTPUT.desc, category: CMD.COPY_LAST_OUTPUT.category, action: () => { const output = this.panes[this.activeIndex]?.pane.shellIntegration.getLastCommandOutput(); if (output) navigator.clipboard.writeText(output); this.closePaletteIfOpen(); } },
       { name: CMD.CREATE_COMMAND.name, desc: CMD.CREATE_COMMAND.desc, category: CMD.CREATE_COMMAND.category, shortcutDisplay: CMD.CREATE_COMMAND.shortcut, action: () => { this.palette.hide(); const input = this.panes[this.activeIndex]?.pane?.getCurrentInput() || ''; this.wizard.show(input); } },
       ...this.themes.map(t => ({
@@ -2027,6 +2797,16 @@ class ElTerminalo {
 
   private closePaletteIfOpen(): void {
     if (this.palette.isOpen()) this.palette.hide();
+  }
+
+  /** Open the command palette. The transcript state is refreshed on the way in
+   *  so the entry can read "Stop Recording (session.log)" rather than offering
+   *  to start a recording that is already running. */
+  private openPalette(): void {
+    this.refreshActiveTranscript()
+      .catch(() => { /* the label just falls back to "Record Transcript" */ })
+      .then(() => this.palette.show())
+      .catch(e => logError('Failed to open the command palette', e));
   }
 
   /** Show the log file in Finder, so a user can attach it to a bug report
@@ -2246,7 +3026,21 @@ class ElTerminalo {
       case 'reopen-tab':
         this.reopenClosedTab().catch(e => logError('Failed to reopen the closed tab', e));
         return;
-      case 'palette': this.palette.show(); return;
+      case 'zoom-pane': this.toggleZoom(); return;
+      case 'next-attention': this.focusNextAttention(); return;
+      case 'reveal-folder':
+        this.openHere('finder').catch(e => logError('Failed to reveal the folder', e));
+        return;
+      case 'toggle-transcript':
+        this.toggleTranscript().catch(e => logError('Failed to toggle the transcript', e));
+        return;
+      case 'save-workspace':
+        this.workspaceModal.show('save').catch(e => logError('Failed to open the workspace dialog', e));
+        return;
+      case 'open-workspace':
+        this.workspaceModal.show('open').catch(e => logError('Failed to open the workspace dialog', e));
+        return;
+      case 'palette': this.openPalette(); return;
       case 'status': this.statusModal.show(); return;
       case 'history': this.historyModal.show(); return;
       case 'reload-settings':
@@ -2287,19 +3081,41 @@ class ElTerminalo {
   private handleKeydown(e: KeyboardEvent): void {
     const isMeta = e.metaKey;
 
-    // Smart render panel (check all panes)
+    // Overlays that belong to a pane rather than to the window: the smart
+    // render panel and a command block's action row. Both are dismissed with
+    // Escape, and both are checked before anything else claims the key.
     for (const tab of this.tabs) {
       for (const p of tab.panes) {
-        if (p.pane.smartRender.isPanelOpen()) {
-          if (p.pane.smartRender.handleKeydown(e)) return;
-        }
+        if (p.pane.smartRender.isPanelOpen() && p.pane.smartRender.handleKeydown(e)) return;
+        if (p.pane.commandMarks.isActionsOpen() && p.pane.commandMarks.handleKeydown(e)) return;
       }
     }
 
     // History modal
+    // Dialogs built on demand rather than owned by a class: the quit and close
+    // confirmations, the update prompt, the model download. They install their
+    // own keydown listener on `document`, but this one is on `window` and the
+    // capture phase runs window before document — so without this branch a
+    // shortcut fires behind the dialog before the dialog ever sees the key, and
+    // "Close Pane?" answers with a closed *tab*. sealMetaKey also keeps the key
+    // from reaching a menu accelerator on WebKit's second pass. Escape and
+    // Enter are not meta keys, so they still reach the dialog's own handler.
+    if (document.querySelector('.update-overlay') !== null) {
+      this.sealMetaKey(e);
+      return;
+    }
+
     if (this.historyModal.isOpen()) {
       e.stopPropagation();
       this.historyModal.handleKeydown(e);
+      this.sealMetaKey(e);
+      return;
+    }
+
+    // Workspace dialog — save and open share one class and one overlay.
+    if (this.workspaceModal.isOpen()) {
+      e.stopPropagation();
+      this.workspaceModal.handleKeydown(e);
       this.sealMetaKey(e);
       return;
     }
@@ -2374,6 +3190,20 @@ class ElTerminalo {
             return;
           }
         }
+      }
+    }
+
+    // Escape leaves zoom — but only from the normal buffer. Escape is the most
+    // heavily bound key a terminal has: vim, less and every other full-screen
+    // program needs it, and they all run on the alternate screen. So a zoomed
+    // pane running one of those keeps its Escape, and the way out is the same
+    // Cmd+Shift+Enter that got in.
+    if (e.key === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey && this.tab?.zoomedPaneId) {
+      const active = this.panes[this.activeIndex];
+      if (active && active.pane.terminal.buffer.active.type === 'normal') {
+        e.preventDefault();
+        this.exitZoom();
+        return;
       }
     }
 
@@ -2459,6 +3289,23 @@ class ElTerminalo {
         this.dispatchAction('close-pane', 'key');
         return;
       }
+      if (e.shiftKey && e.key === 'Enter') {
+        e.preventDefault();
+        this.dispatchAction('zoom-pane', 'key');
+        return;
+      }
+      // Cmd+Shift+A, not Cmd+A: Cmd+A is the Edit menu's Select All, which a
+      // terminal needs as much as a text field does.
+      if (e.shiftKey && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        this.dispatchAction('next-attention', 'key');
+        return;
+      }
+      if (e.shiftKey && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        this.dispatchAction('reveal-folder', 'key');
+        return;
+      }
       // Cmd+G / Cmd+Shift+G belong to the find bar and are answered above while
       // one is open. With none open there is nothing to step through, so they
       // fall through to the shell rather than opening a bar the user did not
@@ -2494,6 +3341,15 @@ class ElTerminalo {
 
   private navigateSpatial(direction: 'left' | 'right' | 'up' | 'down'): void {
     if (this.panes.length <= 1) return;
+    // Nowhere to go while zoomed: zoom means "show me only this pane", and the
+    // rest are not in the document at all. Their rects are the all-zero one a
+    // detached element reports — a box at (0, 0) that the `left` and `up`
+    // filters below happily accept — and setActive() would then move `.active`,
+    // the cursor blink and every "the active pane" lookup there is (Cmd+L,
+    // Cmd+F, the status bar, the transcript toggle, the buffer test that lets
+    // Escape leave zoom) onto a pane nobody can see, while the keyboard stays
+    // with the one they can. Cmd+Shift+Enter is the way out.
+    if (this.tab?.zoomedPaneId) return;
     const current = this.panes[this.activeIndex].element.getBoundingClientRect();
     const cx = current.left + current.width / 2, cy = current.top + current.height / 2;
     const isHorizontal = direction === 'left' || direction === 'right';

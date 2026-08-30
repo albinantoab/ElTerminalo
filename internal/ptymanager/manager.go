@@ -129,6 +129,10 @@ func (m *Manager) CreateSessionWithShell(shell string, cols, rows int, cwd strin
 	if err != nil {
 		return "", err
 	}
+	// Written before the session is reachable by anything else, so no goroutine
+	// can be reading it while it is set. It is how a recording that gives up on
+	// its own — see transcript.go — reaches the frontend.
+	session.emit = m.emit
 
 	m.mu.Lock()
 	m.sessions[session.ID] = session
@@ -172,11 +176,30 @@ func (m *Manager) readPTY(session *Session, dataCh chan<- []byte, doneCh chan<- 
 	defer m.wg.Done()
 	defer close(doneCh)
 	defer m.recoverReader(session)
+	// Registered last so it unwinds first: inside recoverReader's protection,
+	// and before doneCh lets readLoop run the exit sequence. This is what ends
+	// every recording — a shell that exits on its own, Close, CloseAll and the
+	// panic teardown all end with this goroutine returning — and it seals the
+	// session against a transcript started after its reader has gone. Because
+	// this goroutine is registered with the manager's WaitGroup, a transcript is
+	// flushed and its file closed before CloseAll returns.
+	defer session.stopTranscript(true)
 
 	buf := make([]byte, readBufSize)
 	for session.waitForCredit() {
 		n, err := session.Read(buf)
 		if n > 0 {
+			// The transcript is taken here, at the top of the read path, and
+			// deliberately not in readLoop. These are the bytes exactly as they
+			// came off the master, before the copy, before the charge below and
+			// before the hand-off to the flusher — so a recording holds
+			// everything the pty produced whether or not a pane ever attached,
+			// whether or not the frontend is acking, and even when the flusher
+			// dies on a panic and this goroutine is released from a full dataCh
+			// with a batch still in its hand. readLoop only ever sees bytes that
+			// made it through that channel, which is one failure away from being
+			// less than the terminal saw.
+			session.writeTranscript(buf[:n])
 			data := make([]byte, n)
 			copy(data, buf[:n])
 			// Charged at the hand-off rather than at the emit. These bytes are

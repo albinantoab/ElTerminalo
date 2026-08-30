@@ -239,6 +239,22 @@ func buildMenu(app *App) *menu.Menu {
 	file.AddText("Find…", keys.CmdOrCtrl("f"), emit(app, "find"))
 	file.AddText("Clear Terminal", keys.CmdOrCtrl("l"), emit(app, "clear"))
 	file.AddSeparator()
+	// The frontend answers these by calling RevealPath with the active pane's
+	// working directory and by toggling StartTranscript/StopTranscript — it is
+	// the only side that knows which pane is active.
+	file.AddText("Reveal Folder in Finder", keys.Combo("o", keys.CmdOrCtrlKey, keys.ShiftKey), emit(app, "reveal-folder"))
+	// No accelerator, and no "Stop": it is one item whose title the frontend
+	// cannot change from here, so it reads as the thing it starts. Recording is
+	// a deliberate act, not something anyone wants a keystroke away from the
+	// keys that close a pane.
+	file.AddText("Record Transcript", nil, emit(app, "toggle-transcript"))
+	file.AddSeparator()
+	// Both open a prompt rather than acting immediately — one for a name, one
+	// for a list — so neither takes an accelerator, for the same reason Import
+	// Color Scheme… does not.
+	file.AddText("Save Workspace…", nil, emit(app, "save-workspace"))
+	file.AddText("Open Workspace…", nil, emit(app, "open-workspace"))
+	file.AddSeparator()
 	// No accelerator: it opens a file dialog, and it is not a thing anyone does
 	// twice a day. The frontend answers this action by calling
 	// ImportColorScheme, which is also what its palette command calls — one
@@ -258,6 +274,15 @@ func buildMenu(app *App) *menu.Menu {
 	view.AddSeparator()
 	view.AddText("Next Tab", keys.Combo("]", keys.CmdOrCtrlKey, keys.ShiftKey), emit(app, "next-tab"))
 	view.AddText("Previous Tab", keys.Combo("[", keys.CmdOrCtrlKey, keys.ShiftKey), emit(app, "prev-tab"))
+	view.AddSeparator()
+	// "return" is one of the named keys WailsMenu.m's accel: translates — it
+	// and "enter" both become U+000D, which is what AppKit wants for ⇧⌘↩. The
+	// rest of this menu passes single characters straight through; these named
+	// keys are the exception, and the list of them is in keys/parser.go.
+	view.AddText("Zoom Pane", keys.Combo("return", keys.CmdOrCtrlKey, keys.ShiftKey), emit(app, "zoom-pane"))
+	// The counterpart to the Dock badge and the notifications: it walks to the
+	// next pane whose command finished or rang while the user was elsewhere.
+	view.AddText("Next Pane Needing Attention", keys.Combo("a", keys.CmdOrCtrlKey, keys.ShiftKey), emit(app, "next-attention"))
 	view.AddSeparator()
 	view.AddText("Command Palette", keys.CmdOrCtrl("p"), emit(app, "palette"))
 	view.AddText("Session Status", keys.CmdOrCtrl("i"), emit(app, "status"))

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- WKWebView (the Wails frontend) needs JIT and writable/executable
+         memory to run its JavaScript engine under Hardened Runtime. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- The embedded llama.cpp (cgo) and other non-Apple-team libraries must be
+         loadable under Hardened Runtime. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Deliberately NOT sandboxed: a terminal exists to run arbitrary user
+         commands across the whole filesystem. com.apple.security.app-sandbox
+         would confine the app (and its child shells) to a container and defeat
+         that purpose. Access to TCC-protected folders is instead governed by
+         Full Disk Access / per-folder grants plus the NS*UsageDescription
+         strings in Info.plist, which let macOS prompt rather than hard-deny. -->
+</dict>
+</plist>

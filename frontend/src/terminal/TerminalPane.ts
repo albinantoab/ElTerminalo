@@ -8,9 +8,13 @@ import '@xterm/xterm/css/xterm.css';
 import '../types/wails.d.ts';
 import type { PtyExitPayload } from '../types/wails.d.ts';
 import { utf8ToBase64, base64ToBytes } from '../utils';
-import { CMD, ACK_FLUSH_BYTES, ACK_FLUSH_MS, SELECTION_COPY_DEBOUNCE_MS, TITLE_MAX_LENGTH } from '../constants';
+import {
+  CMD, ACK_FLUSH_BYTES, ACK_FLUSH_MS, SELECTION_COPY_DEBOUNCE_MS, TITLE_MAX_LENGTH,
+  NOTIFY_TEXT_MAX_LENGTH,
+} from '../constants';
 import { logError, logWarn } from '../log';
 import { ShellIntegration } from './ShellIntegration';
+import { CommandMarks } from './CommandMarks';
 import { SmartRenderManager } from './smartrender/SmartRenderManager';
 
 export interface XtermTheme {
@@ -99,6 +103,22 @@ function sanitizeForTerminal(s: string): string {
   return s.replace(/[\x00-\x1f\x7f]/g, ' ');
 }
 
+// A notification's text is chosen by whatever is on the far end of the pty — a
+// remote shell as readily as a local one — and ends up in a native banner. Same
+// treatment as every other foreign string, plus a length a banner can show.
+function notifyText(s: string): string {
+  const clean = sanitizeForTerminal(s).trim();
+  if (clean.length <= NOTIFY_TEXT_MAX_LENGTH) return clean;
+  // slice() counts UTF-16 code units, so a cut that lands between the halves of
+  // a surrogate pair keeps the high half on its own — and a lone surrogate is
+  // U+FFFD by the time it reaches the banner. Emoji are exactly what a "build
+  // finished" notification is full of, so the cut steps back one unit when the
+  // last kept unit is a high surrogate.
+  const last = clean.charCodeAt(NOTIFY_TEXT_MAX_LENGTH - 1);
+  const splitsPair = last >= 0xd800 && last <= 0xdbff;
+  return clean.slice(0, splitsPair ? NOTIFY_TEXT_MAX_LENGTH - 1 : NOTIFY_TEXT_MAX_LENGTH);
+}
+
 export class TerminalPane {
   public sessionId: string = '';
   public terminal: Terminal;
@@ -141,6 +161,7 @@ export class TerminalPane {
   private lastRightClickAt = 0;
   public shellIntegration: ShellIntegration;
   public smartRender: SmartRenderManager;
+  public commandMarks!: CommandMarks;
   // Last directory the shell reported (OSC 7), or the one this pane was opened
   // with. Never cleared once set: a momentary failure to read the cwd must not
   // be allowed to erase the pane's folder from the saved layout.
@@ -150,6 +171,9 @@ export class TerminalPane {
   // line behind a hand-renamed tab when the tab bar picks a name.
   private oscTitle = '';
   private cwdOscHandler: IDisposable | null = null;
+  // OSC 9 and OSC 777, the two "post a notification" sequences shells and
+  // long-running tools actually emit. Disposed with the pane.
+  private notifyOscHandlers: IDisposable[] = [];
   private disposed = false;
   private connecting = false;
   // Set while the pane has no shell and is showing a "Press Enter" hint, so a
@@ -163,6 +187,12 @@ export class TerminalPane {
    *  a bell *means* — the sound, the flash, the tab marker — because only it
    *  knows whether this pane is the one being looked at. */
   public onBell: (() => void) | null = null;
+  /** Called when the shell asked for the user by name: OSC 9 (`ESC ] 9 ; body
+   *  BEL`, iTerm2's "post notification") or OSC 777 (`ESC ] 777 ; notify ;
+   *  title ; body BEL`, urxvt's). Both strings are already sanitized and
+   *  capped; either may be '', and the host fills in what it knows instead.
+   *  Like the bell, what a notification *means* is the host's to decide. */
+  public onNotify: ((title: string, body: string) => void) | null = null;
   /** Called when anything that feeds this pane's displayed name changes: the
    *  OSC 0/2 title, or the OSC 7 working directory. Fired on every report, so
    *  the host debounces rather than the pane guessing what it is for. */
@@ -291,14 +321,55 @@ export class TerminalPane {
       }
       return true;
     });
+
+    // OSC 9: `ESC ] 9 ; <body> BEL`. iTerm2's "post a notification", and what
+    // most scripts that want to be noticed emit. There is no title in the
+    // sequence — the host names the pane instead.
+    this.notifyOscHandlers.push(this.terminal.parser.registerOscHandler(9, (data: string) => {
+      // ConEmu overloaded the same number for a progress bar — `9;4;<state>;
+      // <percent>`, which `winget` and a few cross-platform build tools emit.
+      // That is a gauge, not a message, and posting "4;1;60" as a notification
+      // would be nonsense.
+      if (data.startsWith('4;')) return true;
+      const body = notifyText(data);
+      if (body) this.onNotify?.('', body);
+      return true;
+    }));
+
+    // OSC 777: `ESC ] 777 ; notify ; <title> ; <body> BEL` — urxvt's, also
+    // emitted by tmux's `display-popup` wrappers and a few CI tools. Only the
+    // `notify` sub-command is ours; 777 carries others (`precmd`, `Rmodule`)
+    // that are none of this app's business, and returning true for those would
+    // claim to have handled them.
+    this.notifyOscHandlers.push(this.terminal.parser.registerOscHandler(777, (data: string) => {
+      const parts = data.split(';');
+      if (parts[0] !== 'notify') return false;
+      const title = notifyText(parts[1] || '');
+      // Everything after the title is the body, semicolons and all.
+      const body = notifyText(parts.slice(2).join(';'));
+      if (title || body) this.onNotify?.(title, body);
+      return true;
+    }));
+
     this.smartRender = new SmartRenderManager(this.terminal, container, this.shellIntegration);
+
+    // The gutter marks down the left of each command block. They read the same
+    // OSC 133 blocks the shell integration tracks and draw outside the cell
+    // grid; see CommandMarks.
+    this.commandMarks = new CommandMarks(this.terminal, container, this.shellIntegration, {
+      fillInput: (text: string) => this.fillInput(text),
+    });
 
     // Send CSI u sequence for Shift+Enter so apps like Claude CLI can
     // distinguish it from plain Enter (matches iTerm / Kitty behaviour).
     // Ctrl+L is deliberately left alone: vim, less, tmux and Claude Code all
     // bind it, and Cmd+L is this app's own clear.
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (e.type === 'keydown' && e.shiftKey && e.key === 'Enter') {
+      // Cmd+Shift+Enter is the app's own "zoom this pane" and never reaches the
+      // shell: xterm's custom key handler runs whatever the window-level
+      // shortcut did with the event, so without the metaKey test the same
+      // keystroke would both zoom the pane and type a CSI u sequence into it.
+      if (e.type === 'keydown' && e.shiftKey && !e.metaKey && e.key === 'Enter') {
         e.preventDefault();
         this.sendInput('\x1b[13;2u');
         return false;
@@ -480,6 +551,29 @@ export class TerminalPane {
     this.sendInput(text);
   }
 
+  /** Put text on the shell's command line without running it — the palette's
+   *  Cmd+Enter convention, used by a command block's "Re-run". Single-line text
+   *  goes as-is; anything with a newline in it goes through xterm's own paste
+   *  path, so the shell treats it as one thing to look at rather than running
+   *  line by line the moment it lands.
+   *
+   *  Through `paste()` rather than by writing `\x1b[200~…\x1b[201~` here,
+   *  because only xterm knows whether the shell has bracketed paste switched
+   *  on: the markers are meaningless to a shell that never asked for them, and
+   *  a command reached back for in the scrollback would type a literal
+   *  `ESC[200~` into a plain `sh`, into a remote shell mid-`ssh`, or into
+   *  anything else that has the mode off. With it off there is no way to hand
+   *  a shell more than one line without it running them — which is exactly what
+   *  Cmd+V of the same text does, and the honest answer either way. */
+  fillInput(text: string): void {
+    if (this.disposed || !this.sessionId || !text) return;
+    if (!text.includes('\n')) {
+      this.sendInput(text);
+      return;
+    }
+    this.pasteText(text);
+  }
+
   /** Paste text into this pane on the app's own behalf — text or a link dragged
    *  in from another application. Goes through xterm's paste path, exactly like
    *  Cmd+V and the context menu: writing it as raw input would skip bracketed
@@ -615,8 +709,9 @@ export class TerminalPane {
     // The dead shell may have left the alternate buffer, mouse tracking or
     // bracketed paste switched on; only a full reset guarantees a usable slate.
     // Drop the tracked command blocks first so their markers — and the badges
-    // hanging off them — go with the buffer they point into.
+    // and gutter marks hanging off them — go with the buffer they point into.
     this.shellIntegration.reset();
+    this.commandMarks.clear();
     // Same reason as the command blocks: the search addon's highlights are
     // decorations hung off markers in the buffer that is about to go. The
     // addon itself survives reset() — reset() rebuilds the buffer and the
@@ -1010,11 +1105,14 @@ export class TerminalPane {
     const sid = this.sessionId;
     this.unsubscribeSession();
     this.smartRender.dispose();
+    this.commandMarks.dispose();
     this.shellIntegration.dispose();
     if (this.cwdOscHandler) {
       this.cwdOscHandler.dispose();
       this.cwdOscHandler = null;
     }
+    for (const h of this.notifyOscHandlers) h.dispose();
+    this.notifyOscHandlers = [];
     if (this.resizeTimer) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;

@@ -1,0 +1,112 @@
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <key>CFBundlePackageType</key>
+        <string>APPL</string>
+        <key>CFBundleName</key>
+        <string>{{.Info.ProductName}}</string>
+        <key>CFBundleExecutable</key>
+        <string>{{.OutputFilename}}</string>
+        <!-- Load-bearing for privacy permissions, not just a name. macOS keys
+             every TCC grant this app is given — Desktop, Documents, Downloads,
+             removable and network volumes, Full Disk Access, notifications — to
+             the bundle identifier. Changing it again is not a rename: it makes
+             the app a different application to the system, every existing grant
+             is orphaned against an identity nothing will ever ask for again, and
+             every user has to answer every consent prompt a second time. Change
+             it only with that cost accepted and announced. -->
+        <key>CFBundleIdentifier</key>
+        <string>com.albinanto.elterminalo</string>
+        <key>CFBundleVersion</key>
+        <string>{{.Info.ProductVersion}}</string>
+        <key>CFBundleGetInfoString</key>
+        <string>{{.Info.Comments}}</string>
+        <key>CFBundleShortVersionString</key>
+        <string>{{.Info.ProductVersion}}</string>
+        <key>CFBundleIconFile</key>
+        <string>iconfile</string>
+        <!-- The truthful floor, not an aspiration. It was 10.13.0, which the app
+             could not have run on for years: LSMinimumSystemVersion is what the
+             installer and the App Store check, so a number below what the binary
+             actually needs means the DMG installs happily onto a system where
+             the app then fails to launch — or crashes on first use — with
+             nothing to explain why.
+
+             12.0 is the highest of the four floors this build actually has:
+
+               * the Go toolchain. Go 1.25 and later require macOS 12 Monterey,
+                 and stamp minos 12.0 into LC_BUILD_VERSION, so dyld refuses to
+                 load the binary at all on 11 or earlier. Verify with
+                 `otool -l build/bin/ElTerminalo.app/Contents/MacOS/ElTerminalo
+                 | grep -A3 LC_BUILD_VERSION`, and raise this key if that number
+                 ever moves.
+               * arm64 (macOS 11+), which is the only architecture released.
+               * UNUserNotificationCenter, used by internal/macos (10.14+), and
+                 the Hardened Runtime the release is signed with (10.14+).
+               * Metal and MetalPerformanceShaders, which the bundled llama.cpp
+                 builds against.
+
+             Raise it if the toolchain's floor rises; do not lower it. -->
+        <key>LSMinimumSystemVersion</key>
+        <string>12.0</string>
+        <key>NSHighResolutionCapable</key>
+        <string>true</string>
+        <key>NSHumanReadableCopyright</key>
+        <string>{{.Info.Copyright}}</string>
+        <!-- Privacy usage strings. A terminal runs whatever commands the user
+             types, which routinely touch TCC-protected locations. Without these
+             strings macOS cannot present a consent prompt, so a first-time or
+             re-validated access fails closed with EPERM ("Operation not
+             permitted") instead of asking — which strands the shell until the
+             app is relaunched. NSFileProviderDomainUsageDescription covers the
+             iCloud-managed Desktop & Documents tree specifically. -->
+        <key>NSDesktopFolderUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files on your Desktop.</string>
+        <key>NSDocumentsFolderUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files in your Documents folder.</string>
+        <key>NSDownloadsFolderUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files in your Downloads folder.</string>
+        <key>NSRemovableVolumesUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files on removable volumes.</string>
+        <key>NSNetworkVolumesUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files on network volumes.</string>
+        <key>NSFileProviderDomainUsageDescription</key>
+        <string>ElTerminalo runs the shell commands you type, which may read or write files synced by iCloud Drive and other file providers.</string>
+        {{if .Info.FileAssociations}}
+        <key>CFBundleDocumentTypes</key>
+        <array>
+          {{range .Info.FileAssociations}}
+          <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+              <string>{{.Ext}}</string>
+            </array>
+            <key>CFBundleTypeName</key>
+            <string>{{.Name}}</string>
+            <key>CFBundleTypeRole</key>
+            <string>{{.Role}}</string>
+            <key>CFBundleTypeIconFile</key>
+            <string>{{.IconName}}</string>
+          </dict>
+          {{end}}
+        </array>
+        {{end}}
+        {{if .Info.Protocols}}
+        <key>CFBundleURLTypes</key>
+        <array>
+          {{range .Info.Protocols}}
+            <dict>
+                <key>CFBundleURLName</key>
+                <string>com.albinanto.elterminalo.{{.Scheme}}</string>
+                <key>CFBundleURLSchemes</key>
+                <array>
+                    <string>{{.Scheme}}</string>
+                </array>
+                <key>CFBundleTypeRole</key>
+                <string>{{.Role}}</string>
+            </dict>
+          {{end}}
+        </array>
+        {{end}}
+    </dict>
+</plist>
