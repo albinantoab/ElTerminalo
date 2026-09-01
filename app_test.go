@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"os"
@@ -548,4 +549,132 @@ func TestResolveEditorAppAcceptsAnAbsoluteBundlePathAndNothingElse(t *testing.T)
 	if got, _ := resolveEditorApp(true); got != "" {
 		t.Errorf("resolveEditorApp with $VISUAL=%q = %q, want the OS default", cli, got)
 	}
+}
+
+// A screenshot dragged from macOS's thumbnail lives in a directory the system
+// deletes seconds later, so the true path the native drop reports is worthless
+// by the time anything reads it. These cover the swap that fixes that, and the
+// equally important half: a path that is durable must be left exactly alone.
+
+func TestIsVolatilePathFollowsTheConfiguredRoots(t *testing.T) {
+	tmp := t.TempDir()
+	prev := volatileRoots
+	volatileRoots = []string{tmp, "/tmp"}
+	t.Cleanup(func() { volatileRoots = prev })
+
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{filepath.Join(tmp, "TemporaryItems", "NSIRD_screencaptureui_x", "Shot.png"), true},
+		{tmp, true},
+		{"/tmp/x.png", true},
+		{"/tmpfoo/x.png", false}, // prefix match must respect the separator
+		{"/Users/someone/Documents/x.png", false},
+		{"/Users/someone/Desktop/Shot.png", false},
+	} {
+		if got := isVolatilePath(tc.path); got != tc.want {
+			t.Errorf("isVolatilePath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestPreserveVolatileDropsCopiesOutOfTempAndLeavesDurablePathsAlone(t *testing.T) {
+	volatile := t.TempDir()
+	durable := t.TempDir()
+	cfg := t.TempDir()
+
+	prev := volatileRoots
+	volatileRoots = []string{volatile}
+	t.Cleanup(func() { volatileRoots = prev })
+
+	shot := filepath.Join(volatile, "Screenshot 2026-09-01 at 4.12.37 PM.png")
+	want := []byte("\x89PNG\r\n\x1a\n screenshot bytes")
+	if err := os.WriteFile(shot, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(durable, "notes.txt")
+	if err := os.WriteFile(keep, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := preserveVolatileDrops(cfg, []string{shot, keep})
+	if len(got) != 2 {
+		t.Fatalf("got %d paths, want 2: %q", len(got), got)
+	}
+
+	if got[1] != keep {
+		t.Errorf("a durable path was rewritten: %q, want %q", got[1], keep)
+	}
+	if got[0] == shot {
+		t.Fatal("the volatile path was handed back unchanged; it will be gone before anything reads it")
+	}
+	if dir := filepath.Join(cfg, dropsDirName); !strings.HasPrefix(got[0], dir+string(os.PathSeparator)) {
+		t.Errorf("copy landed at %q, want it under %q", got[0], dir)
+	}
+	if !strings.HasSuffix(got[0], "Screenshot 2026-09-01 at 4.12.37 PM.png") {
+		t.Errorf("copy lost the original name: %q", got[0])
+	}
+
+	// The copy must survive the source being deleted — that is the whole point.
+	if err := os.Remove(shot); err != nil {
+		t.Fatal(err)
+	}
+	back, err := os.ReadFile(got[0])
+	if err != nil {
+		t.Fatalf("preserved copy unreadable after the source vanished: %v", err)
+	}
+	if !bytes.Equal(back, want) {
+		t.Errorf("preserved copy differs from the dropped file")
+	}
+	if info, err := os.Stat(got[0]); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Errorf("copy mode = %v, want 0600", info.Mode().Perm())
+	}
+	if left, _ := filepath.Glob(filepath.Join(cfg, dropsDirName, ".drop-*")); len(left) != 0 {
+		t.Errorf("a half-written temp file was left behind: %q", left)
+	}
+}
+
+func TestPreserveVolatileDropsSkipsAFileThatVanishedMidDrop(t *testing.T) {
+	volatile := t.TempDir()
+	cfg := t.TempDir()
+	prev := volatileRoots
+	volatileRoots = []string{volatile}
+	t.Cleanup(func() { volatileRoots = prev })
+
+	got := preserveVolatileDrops(cfg, []string{filepath.Join(volatile, "already-gone.png")})
+	if len(got) != 0 {
+		t.Errorf("got %q, want nothing: a path whose file is gone must not be pasted into a shell", got)
+	}
+}
+
+func TestPruneOldDropsKeepsRecentCopies(t *testing.T) {
+	cfg := t.TempDir()
+	dir := filepath.Join(cfg, dropsDirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(dir, "fresh.png")
+	stale := filepath.Join(dir, "stale.png")
+	for _, p := range []string{fresh, stale} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-dropRetention - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	pruneOldDrops(cfg)
+
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("a copy inside the retention window was deleted: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("a copy past the retention window survived: %v", err)
+	}
+	pruneOldDrops(t.TempDir()) // no drops directory at all must not panic
 }

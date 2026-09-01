@@ -188,6 +188,10 @@ func (a *App) startup(ctx context.Context) {
 		log.Printf("startup: history db unavailable: %v", err)
 	}
 
+	// Preserved copies of dropped files outlive the drop on purpose; they must
+	// not outlive it by weeks.
+	pruneOldDrops(a.cfg.Dir())
+
 	// Clean up partial downloads and old model versions
 	llm.CleanStaleFiles(a.cfg.Dir())
 
@@ -239,6 +243,13 @@ func (a *App) registerFileDrop(ctx context.Context) {
 		if len(clean) == 0 {
 			return
 		}
+		// A path is only useful for as long as the file behind it exists, and
+		// some of the things people drag hardest do not last. See
+		// preserveVolatileDrops.
+		clean = preserveVolatileDrops(a.cfg.Dir(), clean)
+		if len(clean) == 0 {
+			return
+		}
 		// %q, not %s: the path is whatever the user dragged, and a filename is
 		// the one string in this log line an attacker gets to choose. A name
 		// carrying a newline and a plausible-looking prefix would otherwise write
@@ -285,6 +296,167 @@ func realPaths(paths []string) []string {
 			len(clean), len(paths), discarded)
 	}
 	return clean
+}
+
+// dropsDirName is where a volatile dropped file is copied so its path keeps
+// meaning something. Inside the config directory, so it is durable and ours.
+const dropsDirName = "drops"
+
+// dropCopyMaxBytes bounds what is worth copying. Past this, handing back the
+// original path is the better of two bad answers: the copy would stall the drop
+// and could fill the disk, and a file that large is unlikely to be a screenshot
+// macOS is about to delete.
+const dropCopyMaxBytes = 512 << 20
+
+// dropRetention is how long a preserved copy is kept. Long enough to still be
+// there tomorrow, short enough that the directory does not grow without end.
+const dropRetention = 7 * 24 * time.Hour
+
+// volatileRoots are the trees whose contents the system may delete at any
+// moment. A var so the tests can point it somewhere they control.
+var volatileRoots = defaultVolatileRoots()
+
+func defaultVolatileRoots() []string {
+	roots := []string{"/tmp", "/private/tmp"}
+	if t := os.TempDir(); t != "" {
+		t = filepath.Clean(t)
+		roots = append(roots, t)
+		// /var is a symlink to /private/var on macOS, and a dropped path can
+		// arrive spelled either way.
+		if strings.HasPrefix(t, "/var/") {
+			roots = append(roots, "/private"+t)
+		} else if rest, ok := strings.CutPrefix(t, "/private/"); ok {
+			roots = append(roots, "/"+rest)
+		}
+	}
+	return roots
+}
+
+// isVolatilePath reports whether p lives somewhere the system prunes.
+func isVolatilePath(p string) bool {
+	p = filepath.Clean(p)
+	for _, root := range volatileRoots {
+		if p == root || strings.HasPrefix(p, root+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// preserveVolatileDrops copies anything dropped from a volatile location into
+// the config directory and returns the copy's path in its place. Paths that
+// name a durable file are returned untouched.
+//
+// This exists because of how a screenshot is dragged. macOS puts the thumbnail's
+// file in $TMPDIR/TemporaryItems/NSIRD_screencaptureui_XXXX/, and deletes that
+// directory once the thumbnail goes away — seconds later. The native drop
+// reports the true path, which is the right answer for a file in ~/Documents and
+// a useless one here: by the time anything reads it, the file is gone. So the
+// true path is kept where it stays true, and swapped for a copy where it does
+// not.
+func preserveVolatileDrops(configDir string, paths []string) []string {
+	out := make([]string, 0, len(paths))
+	var dir string
+	for _, p := range paths {
+		if !isVolatilePath(p) {
+			out = append(out, p)
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && info.Size() > dropCopyMaxBytes {
+			log.Printf("file drop: %q is %d bytes, too large to preserve; using the original path", p, info.Size())
+			out = append(out, p)
+			continue
+		}
+		if dir == "" {
+			dir = filepath.Join(configDir, dropsDirName)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				log.Printf("file drop: cannot create %q (%v); using the original paths", dir, err)
+				return paths
+			}
+		}
+		copied, err := copyDroppedFile(p, dir)
+		if err != nil {
+			// The file went away between the drop and the copy, which is the
+			// whole problem this function exists for. Nothing to hand back.
+			log.Printf("file drop: could not preserve %q: %v", p, err)
+			continue
+		}
+		log.Printf("file drop: preserved %q as %q", p, copied)
+		out = append(out, copied)
+	}
+	return out
+}
+
+// copyDroppedFile copies src into dir under a timestamped name and returns it.
+// The copy lands on a temporary name first, so the path handed to the frontend
+// never names a half-written file.
+func copyDroppedFile(src, dir string) (string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+
+	name := filepath.Base(src)
+	if name == "." || name == string(os.PathSeparator) || name == ".." {
+		name = "dropped-file"
+	}
+	if len(name) > 120 {
+		name = name[:120]
+	}
+	dest := filepath.Join(dir, time.Now().Format("20060102-150405")+"-"+name)
+
+	tmp, err := os.CreateTemp(dir, ".drop-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return "", err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return "", err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		os.Remove(tmpName)
+		return "", err
+	}
+	return dest, nil
+}
+
+// pruneOldDrops deletes preserved copies past their retention. Best effort: a
+// drop that cannot be cleaned up is not worth failing a startup over.
+func pruneOldDrops(configDir string) {
+	dir := filepath.Join(configDir, dropsDirName)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-dropRetention)
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if os.Remove(filepath.Join(dir, e.Name())) == nil {
+			removed++
+		}
+	}
+	if removed > 0 {
+		log.Printf("startup: removed %d dropped file(s) older than %s", removed, dropRetention)
+	}
 }
 
 // beforeClose runs on every quit attempt (Cmd-Q, the window close button, and
